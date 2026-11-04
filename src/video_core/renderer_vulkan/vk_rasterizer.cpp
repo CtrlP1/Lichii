@@ -246,6 +246,7 @@ RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra
       accelerate_dma(buffer_cache, texture_cache, scheduler),
       fence_manager(*this, gpu, texture_cache, buffer_cache, query_cache, device, scheduler),
       frame_dump(memory_allocator, scheduler), wfi_event(device.GetLogical().CreateEvent()) {
+    dynamic_state_flags = DynamicStateFlags();
     scheduler.SetQueryCache(query_cache);
     VideoCommon::GpuSplit::Get().SetIdleHook(
         [](void* argument) { static_cast<Scheduler*>(argument)->FlushDeferred(); },
@@ -356,6 +357,38 @@ void RasterizerVulkan::NoteResolvedDraw(GraphicsPipeline* pipeline, bool is_inde
         .topology = topology,
         .is_indexed = is_indexed,
     };
+}
+
+void RasterizerVulkan::ReportSkips() {
+    const u64 now = VideoCommon::Nx2Profile::Now();
+    SkipStats& stats = skip_stats;
+    if (stats.window_start == 0) {
+        stats.window_start = now;
+        return;
+    }
+    if (now - stats.window_start < 10'000'000'000ULL) {
+        return;
+    }
+    const double seconds = static_cast<double>(now - stats.window_start) / 1e9;
+    const auto rate = [seconds](u64 value) { return static_cast<double>(value) / seconds; };
+    if (VideoCommon::Nx2FastDraw::g_inline_invalidate) {
+        LOG_INFO(Render_Vulkan,
+                 "Inline invalidation per second: {:.0f} ranges; skipped by textures {:.0f}, "
+                 "queries {:.0f}, shaders {:.0f}; verify mismatches {} {} {} (totals)",
+                 rate(stats.ranges), rate(stats.ranges_skipped[CleanTextures]),
+                 rate(stats.ranges_skipped[CleanQueries]), rate(stats.ranges_skipped[CleanShaders]),
+                 stats.invalidation_mismatches[CleanTextures],
+                 stats.invalidation_mismatches[CleanQueries],
+                 stats.invalidation_mismatches[CleanShaders]);
+    }
+    if (VideoCommon::Nx2FastDraw::g_dynamic_skip) {
+        LOG_INFO(Render_Vulkan,
+                 "Dynamic state per second: {:.0f} of {:.0f} updates skipped; verify mismatches {} "
+                 "flags, {} pipeline (totals)",
+                 rate(stats.dynamic_skipped), rate(stats.dynamic_states), stats.dynamic_mismatches,
+                 stats.dynamic_pipeline_mismatches);
+    }
+    stats = SkipStats{.window_start = now};
 }
 
 void RasterizerVulkan::ReportFastDraws() {
@@ -721,7 +754,7 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
 
     {
         Profile::Scope scope{Profile::Zone::DynamicState};
-        UpdateDynamicStates();
+        UpdateDynamicStates(pipeline);
     }
 
     query_cache.NotifySegment(true);
@@ -1817,6 +1850,10 @@ void RasterizerVulkan::InnerInvalidation(std::span<const std::pair<DAddr, std::s
     if (Settings::values.skip_cpu_inner_invalidation.GetValue()) {
         return;
     }
+    if (VideoCommon::Nx2FastDraw::g_inline_invalidate) {
+        FilteredInvalidation(sequences);
+        return;
+    }
     {
         std::scoped_lock lock{texture_cache.mutex};
         for (const auto& [addr, size] : sequences) {
@@ -1833,6 +1870,70 @@ void RasterizerVulkan::InnerInvalidation(std::span<const std::pair<DAddr, std::s
         query_cache.InvalidateRegion(addr, size);
     }
     pipeline_cache.InvalidateRegions(sequences);
+}
+
+void RasterizerVulkan::FilteredInvalidation(
+    std::span<const std::pair<DAddr, std::size_t>> sequences) {
+    // The texture, query and shader caches only hear about ranges on pages they held something
+    // on when last asked; the buffer cache hears about every range.
+    const bool verify = VideoCommon::Nx2FastDraw::g_verify;
+    boost::container::small_vector<std::pair<DAddr, std::size_t>, 16> needed;
+    const auto filter = [&](CleanCache cache, u64 serial, auto&& clean_serial) {
+        needed.clear();
+        for (const auto& [addr, size] : sequences) {
+            if (size == 0) {
+                continue;
+            }
+            if (!clean_pages[cache].Contains(addr, size, serial)) {
+                needed.emplace_back(addr, size);
+                continue;
+            }
+            ++skip_stats.ranges_skipped[cache];
+            if (verify && clean_serial(addr, size) == 0) {
+                ++skip_stats.invalidation_mismatches[cache];
+            }
+        }
+    };
+    skip_stats.ranges += sequences.size();
+
+    const auto texture_serial = [this](DAddr addr, size_t size) {
+        std::scoped_lock lock{texture_cache.mutex};
+        return texture_cache.CleanSerial(addr, size);
+    };
+    filter(CleanTextures, texture_cache.PageSerial(), texture_serial);
+    if (!needed.empty()) {
+        std::scoped_lock lock{texture_cache.mutex};
+        for (const auto& [addr, size] : needed) {
+            texture_cache.WriteMemory(addr, size);
+            clean_pages[CleanTextures].Fill(addr, size, texture_serial);
+        }
+    }
+    {
+        std::scoped_lock lock{buffer_cache.mutex};
+        for (const auto& [addr, size] : sequences) {
+            buffer_cache.WriteMemory(addr, size);
+        }
+    }
+    const auto query_serial = [this](DAddr addr, size_t size) {
+        return query_cache.CleanSerial(addr, size);
+    };
+    filter(CleanQueries, query_cache.PageSerial(), query_serial);
+    for (const auto& [addr, size] : needed) {
+        query_cache.InvalidateRegion(addr, size);
+        clean_pages[CleanQueries].Fill(addr, size, query_serial);
+    }
+    const auto shader_serial = [this](DAddr addr, size_t size) {
+        return pipeline_cache.CleanSerial(addr, size);
+    };
+    filter(CleanShaders, pipeline_cache.PageSerial(), shader_serial);
+    if (!needed.empty()) {
+        pipeline_cache.InvalidateRegions(std::span{needed.data(), needed.size()});
+        for (const auto& [addr, size] : needed) {
+            clean_pages[CleanShaders].Fill(addr, size, shader_serial);
+        }
+    } else if (pipeline_cache.HasPendingRemovals()) {
+        pipeline_cache.SyncGuestHost();
+    }
 }
 
 bool RasterizerVulkan::OnCPUWrite(DAddr addr, u64 size) {
@@ -2079,6 +2180,10 @@ void RasterizerVulkan::TickFrame() {
     if (VideoCommon::Nx2FastDraw::g_enabled) [[unlikely]] {
         ReportFastDraws();
         VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Frame);
+    }
+    if (VideoCommon::Nx2FastDraw::g_inline_invalidate ||
+        VideoCommon::Nx2FastDraw::g_dynamic_skip) [[unlikely]] {
+        ReportSkips();
     }
     frame_dump.TickFrame();
     ++render_trace_frame;
@@ -2410,7 +2515,7 @@ bool AccelerateDMA::BufferToImage(const Tegra::DMA::ImageCopy& copy_info,
     return DmaBufferImageCopy<true>(copy_info, buffer_operand, image_operand);
 }
 
-void RasterizerVulkan::UpdateDynamicStates() {
+void RasterizerVulkan::UpdateDynamicStates(GraphicsPipeline* pipeline) {
     auto& regs = maxwell3d->regs;
     auto& flags = maxwell3d->dirty.flags;
     const auto topology = maxwell3d->draw_manager.draw_state.topology;
@@ -2420,6 +2525,81 @@ void RasterizerVulkan::UpdateDynamicStates() {
         flags[Dirty::PrimitiveRestartEnable] = true;
     }
 
+    const bool skip_enabled = VideoCommon::Nx2FastDraw::g_dynamic_skip;
+    if (skip_enabled) {
+        ++skip_stats.dynamic_states;
+    }
+    if (skip_enabled && !topology_changed && (flags & dynamic_state_flags).none()) {
+        ++skip_stats.dynamic_skipped;
+        if (VideoCommon::Nx2FastDraw::g_verify) {
+            // Nothing may be recorded: any flag the full update consumes was outside the mask.
+            const auto before = flags;
+            UpdateFixedDynamicStates(regs, topology, topology_changed);
+            skip_stats.dynamic_mismatches += before != flags ? 1 : 0;
+        }
+    } else {
+        UpdateFixedDynamicStates(regs, topology, topology_changed);
+    }
+
+    if (device.IsExtVertexInputDynamicStateSupported()) {
+        GraphicsPipeline* const gp = skip_enabled && pipeline != nullptr
+                                         ? pipeline
+                                         : pipeline_cache.CurrentGraphicsPipeline();
+        if (skip_enabled && pipeline != nullptr && VideoCommon::Nx2FastDraw::g_verify) {
+            skip_stats.dynamic_pipeline_mismatches +=
+                pipeline != pipeline_cache.CurrentGraphicsPipeline() ? 1 : 0;
+        }
+        if (gp && gp->HasDynamicVertexInput()) {
+            UpdateVertexInput(regs);
+        }
+    }
+}
+
+Tegra::Engines::Maxwell3D::DirtyState::Flags RasterizerVulkan::DynamicStateFlags() const {
+    // The flag each Update* below tests first; the rest are only read once that one is set.
+    Tegra::Engines::Maxwell3D::DirtyState::Flags result;
+    const auto set = [&result](std::initializer_list<u8> flags) {
+        for (const u8 flag : flags) {
+            result[flag] = true;
+        }
+    };
+    set({Dirty::Viewports, VideoCommon::Dirty::RescaleViewports, Dirty::Scissors,
+         VideoCommon::Dirty::RescaleScissors, Dirty::DepthBias, VideoCommon::Dirty::DepthBiasGlobal,
+         Dirty::BlendConstants, Dirty::DepthBounds, Dirty::StencilProperties, Dirty::LineWidth});
+    if (device.IsExtExtendedDynamicStateSupported()) {
+        set({Dirty::CullMode, Dirty::DepthCompareOp, Dirty::FrontFace, Dirty::StencilOp,
+             Dirty::StateEnable});
+    }
+    if (device.IsExtExtendedDynamicState2Supported()) {
+        set({Dirty::PrimitiveRestartEnable, Dirty::RasterizerDiscardEnable, Dirty::DepthBiasEnable});
+    }
+    if (device.IsExtExtendedDynamicState2ExtrasSupported()) {
+        set({Dirty::LogicOp});
+    }
+    if (device.IsExtExtendedDynamicState3EnablesSupported()) {
+        set({Dirty::LogicOpEnable, Dirty::DepthClampEnable, Dirty::LineStippleEnable,
+             Dirty::ConservativeRasterizationMode, Dirty::AlphaToCoverageEnable,
+             Dirty::AlphaToOneEnable});
+        if (device.IsExtLineRasterizationSupported()) {
+            set({Dirty::LineRasterizationMode});
+        }
+        // The AMD workaround rewrites logic_op.enable from the vertex formats on every draw.
+        if (device.GetDriverID() == VkDriverIdKHR::VK_DRIVER_ID_AMD_OPEN_SOURCE ||
+            device.GetDriverID() == VkDriverIdKHR::VK_DRIVER_ID_AMD_PROPRIETARY) {
+            result.set();
+        }
+    }
+    if (device.IsExtExtendedDynamicState3BlendingSupported()) {
+        set({Dirty::Blending});
+    } else if (device.IsExtColorWriteEnableSupported()) {
+        set({Dirty::ColorMask});
+    }
+    return result;
+}
+
+void RasterizerVulkan::UpdateFixedDynamicStates(Tegra::Engines::Maxwell3D::Regs& regs,
+                                                Maxwell::PrimitiveTopology topology,
+                                                bool topology_changed) {
     UpdateViewportsState(regs);
     UpdateScissorsState(regs);
     UpdateDepthBias(regs);
@@ -2485,12 +2665,6 @@ void RasterizerVulkan::UpdateDynamicStates() {
         UpdateBlending(regs);
     } else if (device.IsExtColorWriteEnableSupported()) {
         UpdateColorWriteEnable(regs);
-    }
-
-    if (device.IsExtVertexInputDynamicStateSupported()) {
-        if (auto* gp = pipeline_cache.CurrentGraphicsPipeline(); gp && gp->HasDynamicVertexInput()) {
-            UpdateVertexInput(regs);
-        }
     }
 }
 

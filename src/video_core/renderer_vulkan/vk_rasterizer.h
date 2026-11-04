@@ -18,6 +18,7 @@
 #include "video_core/control/channel_state_cache.h"
 #include "video_core/engines/maxwell_dma.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
+#include "video_core/nx2_clean_pages.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/renderer_vulkan/blit_image.h"
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
@@ -194,7 +195,14 @@ private:
     /// the GPU makes them now (BufferCache::Nx2CopyListPages).
     void SubmitNx2ListCopies();
 
-    void UpdateDynamicStates();
+    /// EDEN_NX2_DYNAMIC_SKIP: pipeline is the draw's (null: look it up).
+    void UpdateDynamicStates(GraphicsPipeline* pipeline = nullptr);
+    void UpdateFixedDynamicStates(Tegra::Engines::Maxwell3D::Regs& regs,
+                                  Maxwell::PrimitiveTopology topology, bool topology_changed);
+    /// The dirty flags that make UpdateFixedDynamicStates record anything on this device.
+    Tegra::Engines::Maxwell3D::DirtyState::Flags DynamicStateFlags() const;
+    /// EDEN_NX2_INLINE_INVALIDATE
+    void FilteredInvalidation(std::span<const std::pair<DAddr, std::size_t>> sequences);
 
     void HandleTransformFeedback();
 
@@ -343,6 +351,22 @@ private:
     void ReportFastDraws();
     ReusableDraw reusable_draw;
     FastDrawStats fast_draw_stats;
+
+    enum CleanCache : size_t { CleanTextures, CleanQueries, CleanShaders, CleanCount };
+    std::array<VideoCommon::Nx2CleanPages, CleanCount> clean_pages{};
+    struct SkipStats {
+        u64 window_start{};
+        u64 ranges{};
+        std::array<u64, CleanCount> ranges_skipped{};
+        std::array<u64, CleanCount> invalidation_mismatches{};
+        u64 dynamic_states{};
+        u64 dynamic_skipped{};
+        u64 dynamic_mismatches{};
+        u64 dynamic_pipeline_mismatches{};
+    };
+    SkipStats skip_stats;
+    Tegra::Engines::Maxwell3D::DirtyState::Flags dynamic_state_flags;
+    void ReportSkips();
 
     struct IndirectTrace {
         vk::Buffer readback;

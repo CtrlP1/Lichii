@@ -941,6 +941,20 @@ void TextureCache<P>::WriteMemory(DAddr cpu_addr, size_t size) {
 }
 
 template <class P>
+u64 TextureCache<P>::CleanSerial(DAddr cpu_addr, size_t size) {
+    bool touched = false;
+    ForEachCPUPage(cpu_addr, size, [&](u64 page) {
+        const auto it = page_table.find(page);
+        touched = it != page_table.end() &&
+                  std::ranges::any_of(it->second, [&](ImageMapId map_id) {
+                      return slot_map_views[map_id].Overlaps(cpu_addr, size);
+                  });
+        return touched;
+    });
+    return touched ? 0 : page_serial.load(std::memory_order_relaxed);
+}
+
+template <class P>
 bool TextureCache<P>::IsDownloadable(const ImageBase& image) const noexcept {
     if (!image.IsSafeGpuCopy() || True(image.flags & (ImageFlagBits::Unbacked | ImageFlagBits::TrimmedLevels))) {
         return false;
@@ -3226,6 +3240,7 @@ void TextureCache<P>::RegisterImage(ImageId image_id) {
     ASSERT_MSG(False(image.flags & ImageFlagBits::Registered),
                "Trying to register an already registered image");
     image.flags |= ImageFlagBits::Registered;
+    page_serial.fetch_add(1, std::memory_order_release);
     total_used_memory += ImageMemoryBytes(slot_images[image_id]);
     image.lru_index = lru_cache.Insert(image_id, frame_tick);
 

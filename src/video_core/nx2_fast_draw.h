@@ -74,6 +74,21 @@ inline const bool g_buffer_skip = [] {
     return value != nullptr && value[0] == '1';
 }();
 
+/// EDEN_NX2_INLINE_INVALIDATE=1: writes the caches must hear about (inline constant buffer data,
+/// inline-to-memory) reach the texture, query and shader caches only on pages those held something
+/// on; the buffer cache hears about all of them.
+inline const bool g_inline_invalidate = [] {
+    const char* const value = std::getenv("EDEN_NX2_INLINE_INVALIDATE");
+    return value != nullptr && value[0] == '1';
+}();
+
+/// EDEN_NX2_DYNAMIC_SKIP=1: a draw with no dynamic state flag set skips the dynamic state updates,
+/// and the vertex input update uses the draw's pipeline instead of looking it up again.
+inline const bool g_dynamic_skip = [] {
+    const char* const value = std::getenv("EDEN_NX2_DYNAMIC_SKIP");
+    return value != nullptr && value[0] == '1';
+}();
+
 inline std::atomic<u64> g_serial{1};
 /// The last break's reason and, for Register and Method, its 3D method (diagnostics).
 inline std::atomic<u32> g_last_break{};
