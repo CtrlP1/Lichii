@@ -61,6 +61,7 @@
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 #include "video_core/nx2_draw_runs.h"
+#include "video_core/nx2_fast_draw.h"
 #include "video_core/nx2_profile.h"
 
 namespace Vulkan {
@@ -256,6 +257,113 @@ RasterizerVulkan::~RasterizerVulkan() {
     scheduler.Finish();
 }
 
+GraphicsPipeline* RasterizerVulkan::TakeReusableDraw(bool is_indexed, bool is_indirect) {
+    ReusableDraw& draw = reusable_draw;
+    const auto full = [&](FullDraw reason) -> GraphicsPipeline* {
+        ++fast_draw_stats.full[static_cast<size_t>(reason)];
+        draw.pipeline = nullptr;
+        return nullptr;
+    };
+    if (draw.pipeline == nullptr) {
+        return full(FullDraw::NoCandidate);
+    }
+    const auto& draw_state = maxwell3d->draw_manager.draw_state;
+    if (is_indirect || draw.is_indexed != is_indexed || draw.maxwell3d != maxwell3d ||
+        draw.topology != draw_state.topology || !draw_state.inline_index_draw_indexes.empty() ||
+        frame_dump.Capturing()) {
+        return full(FullDraw::Kind);
+    }
+    if (draw.serial != VideoCommon::Nx2FastDraw::Serial()) {
+        const u32 last_break = VideoCommon::Nx2FastDraw::g_last_break.load(std::memory_order_relaxed);
+        ++fast_draw_stats.breaks[last_break & 0xff];
+        if (const u32 method = last_break >> 8; method < Maxwell::NUM_REGS) {
+            ++fast_draw_stats.break_methods[method];
+        }
+        return full(FullDraw::StateChanged);
+    }
+    if (draw.tick != scheduler.CurrentTick()) {
+        return full(FullDraw::Submitted);
+    }
+    if (draw.render_pass != scheduler.RenderPassSerial() || !scheduler.IsRenderPassActive() ||
+        scheduler.BoundGraphicsPipeline() != draw.pipeline) {
+        return full(FullDraw::RenderPass);
+    }
+    return draw.pipeline;
+}
+
+void RasterizerVulkan::NoteResolvedDraw(GraphicsPipeline* pipeline, bool is_indexed,
+                                        bool is_indirect) {
+    reusable_draw.pipeline = nullptr;
+    const auto& draw_state = maxwell3d->draw_manager.draw_state;
+    const auto topology = draw_state.topology;
+    if (is_indirect || mesh_draw || !pipeline->IsBuilt() || pipeline->WritesStorage() ||
+        maxwell3d->regs.transform_feedback_enabled != 0 ||
+        !draw_state.inline_index_draw_indexes.empty() ||
+        topology == Maxwell::PrimitiveTopology::Quads ||
+        topology == Maxwell::PrimitiveTopology::QuadStrip ||
+        buffer_cache_runtime.AnyVertexRepacked() || !scheduler.IsRenderPassActive() ||
+        scheduler.BoundGraphicsPipeline() != pipeline ||
+        !VideoCommon::GpuSplit::OnBackThread()) {
+        return;
+    }
+    reusable_draw = ReusableDraw{
+        .pipeline = pipeline,
+        .maxwell3d = maxwell3d,
+        .serial = VideoCommon::Nx2FastDraw::Serial(),
+        .tick = scheduler.CurrentTick(),
+        .render_pass = scheduler.RenderPassSerial(),
+        .topology = topology,
+        .is_indexed = is_indexed,
+    };
+}
+
+void RasterizerVulkan::ReportFastDraws() {
+    const u64 now = VideoCommon::Nx2Profile::Now();
+    FastDrawStats& stats = fast_draw_stats;
+    if (stats.window_start == 0) {
+        stats.window_start = now;
+        return;
+    }
+    if (now - stats.window_start < 10'000'000'000ULL) {
+        return;
+    }
+    const double seconds = static_cast<double>(now - stats.window_start) / 1e9;
+    const auto per_second = [&](FullDraw reason) {
+        return static_cast<double>(stats.full[static_cast<size_t>(reason)]) / seconds;
+    };
+    LOG_INFO(Render_Vulkan,
+             "Fast draw per second: {:.0f} reused | full: {:.0f} after an ineligible draw, {:.0f} "
+             "different kind, {:.0f} state changed, {:.0f} after a submit, {:.0f} render pass "
+             "or pipeline changed, {:.0f} index buffer changed buffers",
+             static_cast<double>(stats.reused) / seconds, per_second(FullDraw::NoCandidate),
+             per_second(FullDraw::Kind), per_second(FullDraw::StateChanged),
+             per_second(FullDraw::Submitted), per_second(FullDraw::RenderPass),
+             per_second(FullDraw::IndexBuffers));
+    std::string breaks;
+    for (size_t reason = 0; reason < stats.breaks.size(); ++reason) {
+        if (stats.breaks[reason] != 0) {
+            breaks += fmt::format(" {} {:.0f}", VideoCommon::Nx2FastDraw::reason_names[reason],
+                                  static_cast<double>(stats.breaks[reason]) / seconds);
+        }
+    }
+    std::vector<std::pair<u32, u32>> methods;
+    for (u32 method = 1; method < stats.break_methods.size(); ++method) {
+        if (stats.break_methods[method] != 0) {
+            methods.emplace_back(stats.break_methods[method], method);
+        }
+    }
+    const size_t shown = std::min<size_t>(methods.size(), 12);
+    std::partial_sort(methods.begin(), methods.begin() + shown, methods.end(), std::greater{});
+    std::string top;
+    for (size_t i = 0; i < shown; ++i) {
+        top += fmt::format(" {:#x}:{:.0f}", methods[i].second,
+                           static_cast<double>(methods[i].first) / seconds);
+    }
+    LOG_INFO(Render_Vulkan, "Fast draw state changes per second by last break:{} | by method:{}",
+             breaks, top);
+    stats = FastDrawStats{.window_start = now};
+}
+
 // Experimental adaptation of PokeDinner commit 76df4591a747: execute the reset shader's
 // indirect record writes on the host until general GPU-address translation is available.
 bool RasterizerVulkan::TryNx2IndirectReset(bool is_indexed, u32 instance_count) {
@@ -280,6 +388,7 @@ bool RasterizerVulkan::TryNx2IndirectReset(bool is_indexed, u32 instance_count) 
     if (!VideoCommon::NativeIndirectReset::Matches(code)) {
         return false;
     }
+    VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::IndirectReset);
     FlushWork();
     gpu_memory->FlushCaching();
     const auto reject = [](std::string_view reason) {
@@ -387,7 +496,9 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
                         regs.rt[0].Address(), regs.rt[0].width, regs.rt[0].height);
         }
     };
-    GraphicsPipeline* const pipeline{[&] {
+    GraphicsPipeline* const reused_pipeline =
+        VideoCommon::Nx2FastDraw::g_enabled ? TakeReusableDraw(is_indexed, is_indirect) : nullptr;
+    GraphicsPipeline* const pipeline{reused_pipeline ? reused_pipeline : [&] {
         Profile::Scope scope{Profile::Zone::PipelineLookup};
         return pipeline_cache.CurrentGraphicsPipeline();
     }()};
@@ -414,24 +525,33 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
         return;
     }
     std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
-    // update engine as channel may be different.
-    pipeline->SetEngine(maxwell3d, gpu_memory);
-    const u32 repack_dirty = buffer_cache_runtime.SetVertexRepackLayout(
-        maxwell3d->regs, pipeline->HasDynamicVertexInput());
-    if (repack_dirty) {
-        auto& flags = maxwell3d->dirty.flags;
-        flags[VideoCommon::Dirty::VertexBuffers] = true;
-        flags[Dirty::VertexInput] = true;
-        for (u32 binding = 0; binding < 32; ++binding) {
-            if (repack_dirty & (1U << binding)) {
-                flags[VideoCommon::Dirty::VertexBuffer0 + binding] = true;
+    bool reused = reused_pipeline != nullptr;
+    if (reused && is_indexed && !buffer_cache.RebindIndexBuffer()) {
+        ++fast_draw_stats.full[static_cast<size_t>(FullDraw::IndexBuffers)];
+        reused = false;
+    }
+    if (reused) {
+        ++fast_draw_stats.reused;
+    } else {
+        // update engine as channel may be different.
+        pipeline->SetEngine(maxwell3d, gpu_memory);
+        const u32 repack_dirty = buffer_cache_runtime.SetVertexRepackLayout(
+            maxwell3d->regs, pipeline->HasDynamicVertexInput());
+        if (repack_dirty) {
+            auto& flags = maxwell3d->dirty.flags;
+            flags[VideoCommon::Dirty::VertexBuffers] = true;
+            flags[Dirty::VertexInput] = true;
+            for (u32 binding = 0; binding < 32; ++binding) {
+                if (repack_dirty & (1U << binding)) {
+                    flags[VideoCommon::Dirty::VertexBuffer0 + binding] = true;
+                }
             }
         }
-    }
-    if (Profile::Scope scope{Profile::Zone::Configure}; !pipeline->Configure(is_indexed)) {
-        report_failure("configure failed");
-        TraceRenderState(is_indexed, "configure-failed", nullptr);
-        return;
+        if (Profile::Scope scope{Profile::Zone::Configure}; !pipeline->Configure(is_indexed)) {
+            report_failure("configure failed");
+            TraceRenderState(is_indexed, "configure-failed", nullptr);
+            return;
+        }
     }
 
     TraceRenderState(is_indexed, "configured", texture_cache.GetFramebuffer());
@@ -471,6 +591,9 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
         draw_func();
     }
     submitted = true;
+    if (VideoCommon::Nx2FastDraw::g_enabled && !reused) {
+        NoteResolvedDraw(pipeline, is_indexed, is_indirect);
+    }
     static u32 native_capture_count{};
     if (maxwell3d->GetNativeMacroEngine().native_turing &&
         native_capture_count < 16 && [] {
@@ -1802,6 +1925,9 @@ void RasterizerVulkan::FrameDumpPass(const Framebuffer* framebuffer) {
 void RasterizerVulkan::TickFrame() {
     if (VideoCommon::Nx2DrawRuns::g_enabled) [[unlikely]] {
         VideoCommon::Nx2DrawRuns::OnFrame();
+    }
+    if (VideoCommon::Nx2FastDraw::g_enabled) [[unlikely]] {
+        ReportFastDraws();
     }
     frame_dump.TickFrame();
     ++render_trace_frame;

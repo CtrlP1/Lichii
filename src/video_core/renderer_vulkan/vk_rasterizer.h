@@ -273,6 +273,32 @@ private:
     bool pending_native_work{};
     bool mesh_draw{}; ///< the draw being prepared uses a task/mesh pipeline
 
+    /// EDEN_NX2_FAST_DRAW: what the last fully resolved draw left bound (nx2_fast_draw.h).
+    struct ReusableDraw {
+        GraphicsPipeline* pipeline{};
+        const Tegra::Engines::Maxwell3D* maxwell3d{};
+        u64 serial{};
+        u64 tick{};
+        u64 render_pass{};
+        Maxwell::PrimitiveTopology topology{};
+        bool is_indexed{};
+    };
+    enum class FullDraw : u8 { NoCandidate, Kind, StateChanged, Submitted, RenderPass, IndexBuffers, Count };
+    struct FastDrawStats {
+        u64 reused{};
+        std::array<u64, static_cast<size_t>(FullDraw::Count)> full{};
+        /// StateChanged draws by the reason of the last break, and by its 3D method.
+        std::array<u64, static_cast<size_t>(VideoCommon::Nx2FastDraw::Reason::Count)> breaks{};
+        std::array<u32, Maxwell::NUM_REGS> break_methods{};
+        u64 window_start{};
+    };
+    /// The pipeline the draw can reuse with everything the previous draw bound, or null.
+    GraphicsPipeline* TakeReusableDraw(bool is_indexed, bool is_indirect);
+    void NoteResolvedDraw(GraphicsPipeline* pipeline, bool is_indexed, bool is_indirect);
+    void ReportFastDraws();
+    ReusableDraw reusable_draw;
+    FastDrawStats fast_draw_stats;
+
     struct IndirectTrace {
         vk::Buffer readback;
         u64 tick{};

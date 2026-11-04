@@ -115,6 +115,7 @@ add_library(video_core STATIC
     nx2.h
     nx2_cmdpage_diag.h
     nx2_draw_runs.h
+    nx2_fast_draw.h
     nx2_profile.h
     present.h
     pte_kind.h

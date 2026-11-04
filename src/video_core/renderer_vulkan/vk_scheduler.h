@@ -140,6 +140,16 @@ public:
         return state.renderpass != VK_NULL_HANDLE;
     }
 
+    /// Changes whenever a render pass begins or ends.
+    u64 RenderPassSerial() const {
+        return render_pass_serial;
+    }
+
+    /// The graphics pipeline bound in the current command buffer, if the scheduler knows it.
+    const GraphicsPipeline* BoundGraphicsPipeline() const {
+        return state.graphics_pipeline;
+    }
+
     /// Update the pipeline to the current execution context.
     bool UpdateGraphicsPipeline(GraphicsPipeline* pipeline);
 
@@ -428,6 +438,7 @@ private:
     std::unique_ptr<MasterSemaphore> master_semaphore;
     bool fragment_barrier_pending{};
     bool render_pass_has_stores{};
+    u64 render_pass_serial{};
     std::unique_ptr<CommandPool> command_pool;
 
     vk::QueryPool trace_query_pool;

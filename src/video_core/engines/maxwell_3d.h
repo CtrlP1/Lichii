@@ -3268,6 +3268,10 @@ public:
     /// EDEN_NX2_DRAW_RUNS: a register write about to be applied on the back.
     void NoteDrawRunsWrite(u32 method, u32 argument);
 
+    /// EDEN_NX2_FAST_DRAW: registers that only parameterize the next draw or the next constant
+    /// buffer bind, so changing them doesn't end draw reuse.
+    static bool IsFastDrawParameter(u32 method);
+
     /// Handles a write to the CB_DATA[i] register.
     void ProcessCBData(u32 value);
     void ProcessCBMultiData(const u32* start_base, u32 amount);

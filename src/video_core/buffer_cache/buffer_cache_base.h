@@ -380,6 +380,10 @@ public:
 
     [[nodiscard]] std::pair<Buffer*, u32> GetDrawIndirectBuffer();
 
+    /// EDEN_NX2_FAST_DRAW: updates and binds only the index buffer for a reused indexed draw.
+    /// False when that created or deleted buffers, so the draw needs a full resolve.
+    [[nodiscard]] bool RebindIndexBuffer();
+
     template <typename Func>
     void BufferOperations(Func&& func) {
         do {

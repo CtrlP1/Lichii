@@ -144,6 +144,10 @@ public:
         transitions.clear();
     }
 
+    [[nodiscard]] bool WritesStorage() const noexcept {
+        return writes_storage;
+    }
+
     [[nodiscard]] bool IsBuilt() const noexcept {
         return is_built.load(std::memory_order::relaxed);
     }

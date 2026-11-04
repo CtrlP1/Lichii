@@ -549,6 +549,18 @@ void BufferCache<P>::UpdateComputeBuffers() {
 }
 
 template <class P>
+bool BufferCache<P>::RebindIndexBuffer() {
+    const size_t buffers = slot_buffers.size();
+    channel_state->has_deleted_buffers = false;
+    UpdateIndexBuffer();
+    if (channel_state->has_deleted_buffers || slot_buffers.size() != buffers) {
+        return false;
+    }
+    BindHostIndexBuffer();
+    return true;
+}
+
+template <class P>
 void BufferCache<P>::BindHostGeometryBuffers(bool is_indexed) {
     if (is_indexed) {
         BindHostIndexBuffer();
