@@ -107,6 +107,14 @@ void VKAPI_CALL MockVertexBuffers(VkCommandBuffer cmdbuf, u32 first, u32 count,
             fmt::format("{}+{}", Bits(buffers[i]), offsets[i]));
     }
 }
+void VKAPI_CALL MockDepthBias2(VkCommandBuffer cmdbuf, const VkDepthBiasInfoEXT* info) {
+    const auto* const representation =
+        static_cast<const VkDepthBiasRepresentationInfoEXT*>(info->pNext);
+    Set(cmdbuf, "depth_bias",
+        fmt::format("{} {}", info->depthBiasConstantFactor,
+                    representation != nullptr ? static_cast<int>(representation->depthBiasRepresentation)
+                                              : -1));
+}
 void VKAPI_CALL MockCull(VkCommandBuffer cmdbuf, VkCullModeFlags mode) {
     Set(cmdbuf, "cull", fmt::format("{}", mode));
 }
@@ -148,6 +156,7 @@ vk::DeviceDispatch MockDispatchTable() {
     dld.vkCmdPushConstants = &MockPush;
     dld.vkCmdBindVertexBuffers = &MockVertexBuffers;
     dld.vkCmdSetCullModeEXT = &MockCull;
+    dld.vkCmdSetDepthBias2EXT = &MockDepthBias2;
     dld.vkCmdSetStencilReference = &MockStencilReference;
     dld.vkCmdDraw = &MockDraw;
     dld.vkCmdDispatch = &MockDispatch;
@@ -234,7 +243,22 @@ void EmitStream(vk::CommandBuffer cmdbuf, u32 seed) {
     std::mt19937 rng{seed};
     const auto pick = [&](u32 count) { return static_cast<u32>(rng() % count); };
     const auto state_change = [&] {
-        switch (pick(7)) {
+        switch (pick(8)) {
+        case 7: {
+            VkDepthBiasRepresentationInfoEXT representation{
+                .sType = VK_STRUCTURE_TYPE_DEPTH_BIAS_REPRESENTATION_INFO_EXT,
+                .pNext = nullptr,
+                .depthBiasRepresentation = static_cast<VkDepthBiasRepresentationEXT>(pick(2)),
+                .depthBiasExact = VK_FALSE,
+            };
+            const float constant = static_cast<float>(pick(50));
+            if (pick(2) == 0) {
+                cmdbuf.SetDepthBias(constant, 0.0f, 1.0f, &representation);
+            } else {
+                cmdbuf.SetDepthBias(constant, 0.0f, 1.0f, nullptr);
+            }
+            break;
+        }
         case 0:
             cmdbuf.BindPipeline(VK_PIPELINE_BIND_POINT_GRAPHICS, Handle<VkPipeline>(1 + pick(4)));
             break;
@@ -352,6 +376,8 @@ TEST_CASE("ParallelRecord gives every draw the state it has inline", "[video_cor
             const auto actual = Evaluate(parallel, parallel_executes);
             REQUIRE(serial_executes == 0);
             REQUIRE(parallel_executes > 0);
+            // Every pass large enough is split unless a query is open in it.
+            REQUIRE(parallel_executes >= 8);
             REQUIRE(actual.size() == expected.size());
             for (size_t i = 0; i < expected.size(); ++i) {
                 INFO("threads " << threads << " seed " << seed << " result " << i);

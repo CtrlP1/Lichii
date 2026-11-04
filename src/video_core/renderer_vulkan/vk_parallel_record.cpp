@@ -5,6 +5,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <optional>
+#include <set>
+#include <source_location>
 #include <string>
 #include <tuple>
 #include <type_traits>
@@ -198,9 +200,15 @@ constexpr size_t ScalarSize() {
 /// Logs the call when it sets state or a pass is captured, and forwards it unless captured.
 template <typename Write, typename Forward>
 void Handle(Kind kind, std::optional<SlotRange> slots, size_t size, ReplayFn replay,
-            Write&& write, Forward&& forward) {
+            Write&& write, Forward&& forward,
+            std::source_location location = std::source_location::current()) {
     ParallelRecord& r = *t_record;
     if (!slots) {
+        static std::set<u32> logged;
+        if (logged.size() < 16 && logged.insert(location.line()).second) {
+            LOG_INFO(Render_Vulkan, "Parallel record: {} can't be logged ({}:{})",
+                     location.function_name(), location.file_name(), location.line());
+        }
         if (kind == Kind::State) {
             r.Unlogged(Fallback::UnloggedState);
         } else {
@@ -710,15 +718,30 @@ void VKAPI_CALL PushDescriptorSet(VkCommandBuffer cmdbuf, VkDescriptorUpdateTemp
 
 void ReplayDepthBias2(const vk::DeviceDispatch& dld, VkCommandBuffer cmdbuf, const u8* payload) {
     In in{payload};
-    const auto info = in.Get<VkDepthBiasInfoEXT>();
+    auto info = in.Get<VkDepthBiasInfoEXT>();
+    auto representation = in.Get<VkDepthBiasRepresentationInfoEXT>();
+    info.pNext = representation.sType == VK_STRUCTURE_TYPE_DEPTH_BIAS_REPRESENTATION_INFO_EXT
+                     ? &representation
+                     : nullptr;
     dld.vkCmdSetDepthBias2EXT(cmdbuf, &info);
 }
 
+/// The chain may hold one VkDepthBiasRepresentationInfoEXT (the rasterizer's D24 handling).
 void VKAPI_CALL SetDepthBias2(VkCommandBuffer cmdbuf, const VkDepthBiasInfoEXT* info) {
+    const auto* const representation =
+        static_cast<const VkDepthBiasRepresentationInfoEXT*>(info->pNext);
+    const bool loggable =
+        representation == nullptr ||
+        (representation->sType == VK_STRUCTURE_TYPE_DEPTH_BIAS_REPRESENTATION_INFO_EXT &&
+         representation->pNext == nullptr);
     Handle(
-        Kind::State,
-        info->pNext == nullptr ? std::optional{SlotRange{DepthBias, 1}} : std::nullopt,
-        sizeof(*info), &ReplayDepthBias2, [&](u8* p) { Out{p}.Put(*info); },
+        Kind::State, loggable ? std::optional{SlotRange{DepthBias, 1}} : std::nullopt,
+        sizeof(*info) + sizeof(VkDepthBiasRepresentationInfoEXT), &ReplayDepthBias2,
+        [&](u8* p) {
+            Out out{p};
+            out.Put(*info);
+            out.Put(representation != nullptr ? *representation : VkDepthBiasRepresentationInfoEXT{});
+        },
         [&] { t_record->Real().vkCmdSetDepthBias2EXT(cmdbuf, info); });
 }
 
