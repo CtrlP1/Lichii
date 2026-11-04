@@ -152,6 +152,32 @@ public:
         return is_built.load(std::memory_order::relaxed);
     }
 
+    /// EDEN_NX2_FAST_DRAW=2 (nx2_fast_draw.h): whether draws can keep this pipeline's resolved
+    /// image views and samplers after light changes. Storage, texture and image buffers and
+    /// handles computed at draw time are resolved from constant buffers on every draw.
+    [[nodiscard]] bool TakesDeltaDraws() const noexcept {
+        return delta_eligible && delta_views_valid;
+    }
+
+    /// Constant buffer slots per stage the pipeline reads texture and image handles from.
+    [[nodiscard]] const std::array<u32, NUM_STAGES>& HandleConstantBuffers() const noexcept {
+        return handle_constant_buffers;
+    }
+
+    enum class DeltaResult { Configured, Failed, NeedsFull };
+    /// Binds the constant buffers again and records the draw's descriptors with the image views
+    /// and samplers the last full Configure resolved.
+    DeltaResult ConfigureDelta();
+
+    /// EDEN_NX2_FAST_DRAW_VERIFY: the next Configure compares what it resolves with the views
+    /// and samplers a delta draw would have kept; DeltaMismatch reports the result.
+    void VerifyNextDelta() noexcept {
+        verify_delta = true;
+    }
+    [[nodiscard]] bool DeltaMismatch() const noexcept {
+        return delta_mismatch;
+    }
+
     template <typename Spec>
     static auto MakeConfigureSpecFunc() {
         return [](GraphicsPipeline* pl, bool is_indexed) { return pl->ConfigureImpl<Spec>(is_indexed); };
@@ -203,6 +229,15 @@ private:
     u32 num_textures{};
     bool fragment_has_color0_output{};
     bool writes_storage{};
+
+    bool delta_eligible{};
+    bool delta_views_valid{};
+    bool verify_delta{};
+    bool delta_mismatch{};
+    std::array<bool, NUM_STAGES> configured_stages{};
+    std::array<u32, NUM_STAGES> handle_constant_buffers{};
+    std::vector<VideoCommon::ImageViewInOut> delta_views;
+    std::vector<VideoCommon::SamplerId> delta_samplers;
 
     vk::DescriptorSetLayout descriptor_set_layout;
     DescriptorAllocator descriptor_allocator;

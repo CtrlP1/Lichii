@@ -283,17 +283,58 @@ private:
         Maxwell::PrimitiveTopology topology{};
         bool is_indexed{};
     };
-    enum class FullDraw : u8 { NoCandidate, Kind, StateChanged, Submitted, RenderPass, IndexBuffers, Count };
+    enum class FullDraw : u8 {
+        NoCandidate,
+        Kind,
+        StateChanged,
+        Submitted,
+        RenderPass,
+        IndexBuffers,
+        DeltaPipeline,
+        HandleBind,
+        HandleData,
+        DeltaBuffers,
+        Count,
+    };
+    /// Why a fully resolved draw can't be reused by the next one.
+    enum class Ineligible : u8 {
+        Indirect,
+        Mesh,
+        NotBuilt,
+        WritesStorage,
+        TransformFeedback,
+        InlineIndex,
+        Quads,
+        Repacked,
+        NoRenderPass,
+        PipelineNotBound,
+        OffBackThread,
+        Count,
+    };
+    enum class DrawPath : u8 { Full, Reused, Delta, Count };
     struct FastDrawStats {
         u64 reused{};
+        u64 delta{};
         std::array<u64, static_cast<size_t>(FullDraw::Count)> full{};
+        std::array<u64, static_cast<size_t>(Ineligible::Count)> ineligible{};
+        /// PrepareDraw time and draws per path.
+        std::array<u64, static_cast<size_t>(DrawPath::Count)> prepare_ns{};
+        std::array<u64, static_cast<size_t>(DrawPath::Count)> prepare_draws{};
+        /// EDEN_NX2_FAST_DRAW_VERIFY
+        u64 verified{};
+        u64 pipeline_mismatches{};
+        u64 view_mismatches{};
         /// StateChanged draws by the reason of the last break, and by its 3D method.
         std::array<u64, static_cast<size_t>(VideoCommon::Nx2FastDraw::Reason::Count)> breaks{};
         std::array<u32, Maxwell::NUM_REGS> break_methods{};
         u64 window_start{};
     };
-    /// The pipeline the draw can reuse with everything the previous draw bound, or null.
-    GraphicsPipeline* TakeReusableDraw(bool is_indexed, bool is_indirect);
+    struct ReusableTake {
+        GraphicsPipeline* pipeline{}; ///< null: resolve the draw in full
+        bool delta{};                 ///< light changes since: ConfigureDelta
+    };
+    /// The pipeline the draw can reuse with what the previous draw bound, if any.
+    ReusableTake TakeReusableDraw(bool is_indexed, bool is_indirect);
     void NoteResolvedDraw(GraphicsPipeline* pipeline, bool is_indexed, bool is_indirect);
     void ReportFastDraws();
     ReusableDraw reusable_draw;

@@ -164,3 +164,110 @@ TEST_CASE("Fast draw serial never moves while disabled", "[fast_draw]") {
     f.DrawArrays(0, 3);
     CHECK(f.Reusable());
 }
+
+namespace {
+
+struct DeltaFixture : FastDrawFixture {
+    DeltaFixture() {
+        FastDraw::g_delta_enabled = true;
+        FastDraw::g_delta = {};
+    }
+    ~DeltaFixture() {
+        FastDraw::g_delta_enabled = previous_delta;
+        FastDraw::g_delta = {};
+    }
+
+    void SetConstantBuffer(GPUVAddr address, u32 size, u32 offset) {
+        Write(MAXWELL3D_REG_INDEX(const_buffer.size), size);
+        Write(MAXWELL3D_REG_INDEX(const_buffer.address_high), static_cast<u32>(address >> 32));
+        Write(MAXWELL3D_REG_INDEX(const_buffer.address_low), static_cast<u32>(address));
+        Write(MAXWELL3D_REG_INDEX(const_buffer.offset), offset);
+    }
+
+    const bool previous_delta = FastDraw::g_delta_enabled;
+};
+
+} // namespace
+
+TEST_CASE("Fast draw delta mode records index buffer, bind and constant data changes",
+          "[fast_draw]") {
+    DeltaFixture f;
+    f.DrawArrays(0, 3);
+    const u64 serial = FastDraw::Serial();
+    FastDraw::g_delta = {};
+
+    f.Write(MAXWELL3D_REG_INDEX(index_buffer.start_addr_low),
+            f.Reg(MAXWELL3D_REG_INDEX(index_buffer.start_addr_low)) + 0x100);
+    CHECK(FastDraw::g_delta.index_buffer);
+
+    f.SetConstantBuffer(0x10000, 0x100, 0);
+    f.Write(MAXWELL3D_REG_INDEX(bind_groups[4].raw_config), 0x31); // slot 3, valid
+    CHECK(FastDraw::g_delta.binds[4] == 1U << 3);
+    FastDraw::g_delta.binds[4] = 0;
+    f.Write(MAXWELL3D_REG_INDEX(bind_groups[4].raw_config), 0x31);
+    CHECK(FastDraw::g_delta.binds[4] == 0);
+
+    f.SetConstantBuffer(0x20000, 0x100, 0x10);
+    f.Write(MAXWELL3D_REG_INDEX(const_buffer.buffer), 1);
+    f.Write(MAXWELL3D_REG_INDEX(const_buffer.buffer) + 1, 2);
+    REQUIRE(FastDraw::g_delta.num_writes == 1);
+    CHECK(FastDraw::g_delta.write_begin[0] == 0x20010);
+    CHECK(FastDraw::g_delta.write_end[0] == 0x20018);
+
+    CHECK(FastDraw::Serial() == serial);
+    f.DrawArrays(0, 3);
+    CHECK(f.Reusable());
+    CHECK_FALSE(FastDraw::g_delta.Empty());
+}
+
+TEST_CASE("Fast draw delta mode still breaks on state, texture headers and overflow",
+          "[fast_draw]") {
+    DeltaFixture f;
+    f.Write(MAXWELL3D_REG_INDEX(tex_header.address_high), 0);
+    f.Write(MAXWELL3D_REG_INDEX(tex_header.address_low), 0x40000);
+    f.Write(MAXWELL3D_REG_INDEX(tex_header.limit), 7);
+    f.Write(MAXWELL3D_REG_INDEX(tex_sampler.address_high), 0);
+    f.Write(MAXWELL3D_REG_INDEX(tex_sampler.address_low), 0x50000);
+    f.Write(MAXWELL3D_REG_INDEX(tex_sampler.limit), 7);
+    const auto breaks = [&](auto&& change) {
+        FastDraw::g_delta = {};
+        const u64 serial = FastDraw::Serial();
+        change();
+        return FastDraw::Serial() != serial;
+    };
+    constexpr u32 blend = MAXWELL3D_REG_INDEX(blend.enable[0]);
+    CHECK(breaks([&] { f.Write(blend, f.Reg(blend) ^ 1); }));
+    CHECK(breaks([&] {
+        f.SetConstantBuffer(0x40000, 0x1000, 0xe0); // the last texture header
+        f.Write(MAXWELL3D_REG_INDEX(const_buffer.buffer), 1);
+    }));
+    CHECK(breaks([&] {
+        f.SetConstantBuffer(0x50000, 0x1000, 0);
+        f.Write(MAXWELL3D_REG_INDEX(const_buffer.buffer), 1);
+    }));
+    CHECK_FALSE(breaks([&] {
+        f.SetConstantBuffer(0x40000, 0x1000, 0x100); // just past the headers
+        f.Write(MAXWELL3D_REG_INDEX(const_buffer.buffer), 1);
+    }));
+    CHECK(breaks([&] {
+        f.SetConstantBuffer(0x60000, 0x1000, 0);
+        for (u32 i = 0; i <= FastDraw::Delta::MaxWrites; ++i) {
+            f.Write(MAXWELL3D_REG_INDEX(const_buffer.offset), i * 0x20);
+            f.Write(MAXWELL3D_REG_INDEX(const_buffer.buffer), i);
+        }
+    }));
+}
+
+TEST_CASE("Fast draw mode 1 breaks on what delta mode records", "[fast_draw]") {
+    FastDrawFixture f;
+    REQUIRE_FALSE(FastDraw::g_delta_enabled);
+    f.DrawArrays(0, 3);
+    f.Write(MAXWELL3D_REG_INDEX(index_buffer.start_addr_low),
+            f.Reg(MAXWELL3D_REG_INDEX(index_buffer.start_addr_low)) + 0x100);
+    f.DrawArrays(0, 3);
+    CHECK_FALSE(f.Reusable());
+    f.Write(MAXWELL3D_REG_INDEX(bind_groups[0].raw_config), 0x11);
+    f.DrawArrays(0, 3);
+    CHECK_FALSE(f.Reusable());
+    CHECK(FastDraw::g_delta.Empty());
+}

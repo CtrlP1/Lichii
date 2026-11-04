@@ -18,6 +18,15 @@
 /// memory manager invalidations and fence releases. The rasterizer reuses a draw only while the
 /// serial, the command buffer, the render pass and the bound pipeline are the ones the previous
 /// draw left.
+///
+/// EDEN_NX2_FAST_DRAW=2 also takes the delta path: index buffer registers, constant buffer binds
+/// and inline constant buffer data are light changes collected in g_delta instead of breaks, and
+/// so is the pre-draw invalidation of that data unless it reaches an image, a shader or a bound
+/// vertex buffer (those break). A draw after only light changes keeps the pipeline, image views,
+/// samplers and render targets, and resolves the constant buffers and the index buffer again,
+/// unless a changed constant buffer holds the pipeline's texture handles.
+/// EDEN_NX2_FAST_DRAW_VERIFY=1 resolves those draws in full and counts where the views, samplers
+/// or pipeline differ from what the delta path would have kept.
 namespace VideoCommon::Nx2FastDraw {
 
 enum class Reason : u8 {
@@ -31,16 +40,28 @@ enum class Reason : u8 {
     Invalidation,
     Fence,
     IndirectReset,
+    Frame,
+    TextureHeaders,
+    DeltaOverflow,
     Count,
 };
 
 inline constexpr std::array<const char*, static_cast<size_t>(Reason::Count)> reason_names{
-    "register",  "method",    "constant buffer data", "inline data", "other engine",
-    "deferred call", "tick work", "invalidation", "fence release", "indirect reset",
+    "register",      "method",    "constant buffer data", "inline data",
+    "other engine",  "deferred call", "tick work",        "invalidation",
+    "fence release", "indirect reset", "frame",           "texture header data",
+    "delta overflow",
 };
 
-inline bool g_enabled = [] {
+inline int ModeFromEnvironment() {
     const char* const value = std::getenv("EDEN_NX2_FAST_DRAW");
+    return value == nullptr ? 0 : value[0] == '1' ? 1 : value[0] == '2' ? 2 : 0;
+}
+
+inline bool g_enabled = ModeFromEnvironment() != 0;
+inline bool g_delta_enabled = ModeFromEnvironment() == 2;
+inline const bool g_verify = [] {
+    const char* const value = std::getenv("EDEN_NX2_FAST_DRAW_VERIFY");
     return value != nullptr && value[0] == '1';
 }();
 
@@ -57,6 +78,72 @@ inline void Break(Reason reason, u32 method = 0) {
 
 inline u64 Serial() {
     return g_serial.load(std::memory_order_relaxed);
+}
+
+/// Light changes since the last draw (EDEN_NX2_FAST_DRAW=2). Written and read on the thread that
+/// runs the 3D engine and the rasterizer (the split's back).
+struct Delta {
+    static constexpr size_t MaxWrites = 16;
+
+    std::array<u32, 5> binds{}; ///< Constant buffer slots bound per stage
+    std::array<GPUVAddr, MaxWrites> write_begin{};
+    std::array<GPUVAddr, MaxWrites> write_end{};
+    u32 num_writes{};
+    bool index_buffer{};
+    bool invalidated{};
+
+    [[nodiscard]] bool Empty() const {
+        return num_writes == 0 && !index_buffer && !invalidated &&
+               (binds[0] | binds[1] | binds[2] | binds[3] | binds[4]) == 0;
+    }
+};
+
+inline Delta g_delta;
+
+inline void NoteIndexBuffer(u32 method) {
+    if (g_delta_enabled) {
+        g_delta.index_buffer = true;
+    } else {
+        Break(Reason::Register, method);
+    }
+}
+
+inline void NoteBind(size_t stage, u32 slot) {
+    if (g_delta_enabled) {
+        g_delta.binds[stage] |= 1U << slot;
+    } else {
+        Break(Reason::Method);
+    }
+}
+
+/// Inline constant buffer data written to [begin, end).
+inline void NoteConstantData(GPUVAddr begin, GPUVAddr end) {
+    if (!g_delta_enabled) {
+        Break(Reason::ConstantData);
+        return;
+    }
+    Delta& delta = g_delta;
+    if (delta.num_writes != 0 && delta.write_end[delta.num_writes - 1] == begin) {
+        delta.write_end[delta.num_writes - 1] = end;
+        return;
+    }
+    if (delta.num_writes == Delta::MaxWrites) {
+        Break(Reason::DeltaOverflow);
+        return;
+    }
+    delta.write_begin[delta.num_writes] = begin;
+    delta.write_end[delta.num_writes] = end;
+    ++delta.num_writes;
+}
+
+/// The pre-draw invalidation of cached writes. Its consumers break for what the delta path
+/// doesn't resolve again (images, shaders, bound vertex buffers).
+inline void NoteInvalidation() {
+    if (g_delta_enabled) {
+        g_delta.invalidated = true;
+    } else {
+        Break(Reason::Invalidation);
+    }
 }
 
 } // namespace VideoCommon::Nx2FastDraw

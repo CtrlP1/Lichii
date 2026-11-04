@@ -3269,8 +3269,11 @@ public:
     void NoteDrawRunsWrite(u32 method, u32 argument);
 
     /// EDEN_NX2_FAST_DRAW: registers that only parameterize the next draw or the next constant
-    /// buffer bind, so changing them doesn't end draw reuse.
+    /// buffer bind, or that ProcessMethodCall handles, so writing them doesn't end draw reuse.
     static bool IsFastDrawParameter(u32 method);
+    /// Methods EDEN_NX2_FAST_DRAW=2 records as light changes (constant buffer data and binds).
+    static bool IsFastDrawDeltaMethod(u32 method);
+    void NoteFastDrawConstantData(GPUVAddr begin, GPUVAddr end);
 
     /// Handles a write to the CB_DATA[i] register.
     void ProcessCBData(u32 value);

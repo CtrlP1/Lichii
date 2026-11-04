@@ -24,6 +24,7 @@
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_cmdpage_diag.h"
+#include "video_core/nx2_fast_draw.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/texture_cache/util.h"
 
@@ -195,6 +196,16 @@ void BufferCache<P>::WriteMemory(DAddr device_addr, u64 size, bool keep_page_gpu
     }
     memory_tracker.MarkRegionAsCpuModified(device_addr, size);
     MarkVertexBuffersStale(device_addr, size);
+    // EDEN_NX2_FAST_DRAW=2: delta draws don't bind vertex buffers again.
+    if (Nx2FastDraw::g_delta_enabled && channel_state != nullptr) {
+        for (const Binding& binding : channel_state->vertex_buffers) {
+            if (device_addr < binding.device_addr + binding.size &&
+                binding.device_addr < device_addr + size) {
+                Nx2FastDraw::Break(Nx2FastDraw::Reason::Invalidation);
+                break;
+            }
+        }
+    }
 }
 
 template <class P>
@@ -558,6 +569,18 @@ bool BufferCache<P>::RebindIndexBuffer() {
     }
     BindHostIndexBuffer();
     return true;
+}
+
+template <class P>
+bool BufferCache<P>::UpdateGraphicsUniformBuffers() {
+    const size_t buffers = slot_buffers.size();
+    channel_state->has_deleted_buffers = false;
+    BufferOperations([&]() {
+        for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
+            UpdateUniformBuffers(stage);
+        }
+    });
+    return !channel_state->has_deleted_buffers && slot_buffers.size() == buffers;
 }
 
 template <class P>

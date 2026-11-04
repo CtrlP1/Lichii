@@ -383,6 +383,8 @@ public:
     /// EDEN_NX2_FAST_DRAW: updates and binds only the index buffer for a reused indexed draw.
     /// False when that created or deleted buffers, so the draw needs a full resolve.
     [[nodiscard]] bool RebindIndexBuffer();
+    /// Resolves rebound graphics uniform buffers; false when that created or deleted buffers.
+    [[nodiscard]] bool UpdateGraphicsUniformBuffers();
 
     template <typename Func>
     void BufferOperations(Func&& func) {

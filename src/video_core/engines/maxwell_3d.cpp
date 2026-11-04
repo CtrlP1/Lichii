@@ -369,7 +369,17 @@ void Maxwell3D::ProcessDirtyRegisters(u32 method, u32 argument) {
     }
     if (VideoCommon::Nx2FastDraw::g_enabled && regs.reg_array[method] != argument &&
         !IsFastDrawParameter(method)) [[unlikely]] {
-        VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Register, method);
+        switch (method) {
+        case MAXWELL3D_REG_INDEX(index_buffer.start_addr_high):
+        case MAXWELL3D_REG_INDEX(index_buffer.start_addr_low):
+        case MAXWELL3D_REG_INDEX(index_buffer.limit_addr_high):
+        case MAXWELL3D_REG_INDEX(index_buffer.limit_addr_low):
+        case MAXWELL3D_REG_INDEX(index_buffer.format):
+            VideoCommon::Nx2FastDraw::NoteIndexBuffer(method);
+            break;
+        default:
+            VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Register, method);
+        }
     }
     regs.reg_array[method] = argument;
     for (auto const& table : dirty.tables)
@@ -427,12 +437,30 @@ bool Maxwell3D::IsFastDrawParameter(u32 method) {
     case MAXWELL3D_REG_INDEX(const_buffer.offset):
         return true;
     default:
-        return DrawManager::IsInstanceLoopMethod(method);
+        return DrawManager::IsInstanceLoopMethod(method) || IsFastDrawDeltaMethod(method);
+    }
+}
+
+bool Maxwell3D::IsFastDrawDeltaMethod(u32 method) {
+    constexpr u32 cb_data = MAXWELL3D_REG_INDEX(const_buffer.buffer);
+    if (method >= cb_data && method < cb_data + Regs::NumCBData) {
+        return true;
+    }
+    switch (method) {
+    case MAXWELL3D_REG_INDEX(bind_groups[0].raw_config):
+    case MAXWELL3D_REG_INDEX(bind_groups[1].raw_config):
+    case MAXWELL3D_REG_INDEX(bind_groups[2].raw_config):
+    case MAXWELL3D_REG_INDEX(bind_groups[3].raw_config):
+    case MAXWELL3D_REG_INDEX(bind_groups[4].raw_config):
+        return true;
+    default:
+        return false;
     }
 }
 
 void Maxwell3D::ProcessMethodCall(u32 method, u32 argument, u32 nonshadow_argument, bool is_last_call) {
-    if (!DrawManager::IsInstanceLoopMethod(method)) {
+    if (!DrawManager::IsInstanceLoopMethod(method) &&
+        !(VideoCommon::Nx2FastDraw::g_delta_enabled && IsFastDrawDeltaMethod(method))) {
         VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Method, method);
     }
     if (GetNativeMacroEngine().native_turing && method == MAXWELL3D_REG_INDEX(clear_surface)) {
@@ -650,7 +678,6 @@ void Maxwell3D::CallMultiMethod(Core::System& system, u32 method, const u32* bas
         if (VideoCommon::Nx2DrawRuns::g_enabled) [[unlikely]] {
             VideoCommon::Nx2DrawRuns::OnData(u64{amount} * sizeof(u32));
         }
-        VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::ConstantData);
         ProcessCBMultiData(base_start, amount);
         break;
     case MAXWELL3D_REG_INDEX(inline_data): {
@@ -856,6 +883,11 @@ void Maxwell3D::ProcessCBBind(size_t stage_index) {
         return; // slot field is 5 bits; the state array holds 18
     }
     auto& buffer = state.shader_stages[stage_index].const_buffers[bind_data.shader_slot];
+    if (VideoCommon::Nx2FastDraw::g_delta_enabled &&
+        (buffer.enabled != (bind_data.valid.Value() != 0) ||
+         buffer.address != regs.const_buffer.Address() || buffer.size != regs.const_buffer.size)) {
+        VideoCommon::Nx2FastDraw::NoteBind(stage_index, bind_data.shader_slot);
+    }
     if (VideoCommon::Nx2DrawRuns::g_enabled) [[unlikely]] {
         VideoCommon::Nx2DrawRuns::OnConstBufferBind(
             buffer.enabled == (bind_data.valid.Value() != 0) &&
@@ -875,6 +907,22 @@ void Maxwell3D::ProcessCBBind(size_t stage_index) {
     rasterizer->BindGraphicsUniformBuffer(stage_index, bind_data.shader_slot, gpu_addr, size);
 }
 
+void Maxwell3D::NoteFastDrawConstantData(GPUVAddr begin, GPUVAddr end) {
+    namespace FastDraw = VideoCommon::Nx2FastDraw;
+    // Texture and sampler headers are read when image views are resolved, which delta draws skip.
+    const auto overlaps = [&](GPUVAddr table, u32 limit) {
+        constexpr u64 HeaderSize = 0x20;
+        return begin < table + (u64{limit} + 1) * HeaderSize && table < end;
+    };
+    if (FastDraw::g_delta_enabled &&
+        (overlaps(regs.tex_header.Address(), regs.tex_header.limit) ||
+         overlaps(regs.tex_sampler.Address(), regs.tex_sampler.limit))) {
+        FastDraw::Break(FastDraw::Reason::TextureHeaders);
+        return;
+    }
+    FastDraw::NoteConstantData(begin, end);
+}
+
 void Maxwell3D::ProcessCBMultiData(const u32* start_base, u32 amount) {
     // Write the input value to the current const buffer at the current position.
     const GPUVAddr buffer_address = regs.const_buffer.Address();
@@ -888,6 +936,9 @@ void Maxwell3D::ProcessCBMultiData(const u32* start_base, u32 amount) {
     const size_t write_size = std::min(copy_size, room / sizeof(u32) * sizeof(u32));
     if (write_size != 0) {
         const GPUVAddr address{buffer_address + regs.const_buffer.offset};
+        if (VideoCommon::Nx2FastDraw::g_enabled) {
+            NoteFastDrawConstantData(address, address + write_size);
+        }
         memory_manager.WriteBlockCached(address, start_base, write_size);
     }
     if (write_size != copy_size) {
