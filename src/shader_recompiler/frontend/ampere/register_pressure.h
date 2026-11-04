@@ -42,6 +42,7 @@ inline RegisterPressure PrepareRegisterPressure(const Instruction& input, u32 re
     case 0xa0c:
     case 0x804:
     case 0x80b:
+    case 0x80c:
         operand(24);
         break;
     case 0x20c:
@@ -50,6 +51,8 @@ inline RegisterPressure PrepareRegisterPressure(const Instruction& input, u32 re
         operand(32);
         break;
     case 0x807:
+    case 0x808:
+    case 0x923:
     case 0x820:
     case 0xa20:
     case 0x421:
@@ -60,6 +63,7 @@ inline RegisterPressure PrepareRegisterPressure(const Instruction& input, u32 re
     case 0x208:
     case 0x220:
     case 0x221:
+    case 0x209:
         operand(16);
         operand(24);
         operand(32);
@@ -74,6 +78,7 @@ inline RegisterPressure PrepareRegisterPressure(const Instruction& input, u32 re
         break;
     case 0xa24:
     case 0xa23:
+    case 0x623:
         operand(16);
         operand(24);
         operand(64);
@@ -84,6 +89,14 @@ inline RegisterPressure PrepareRegisterPressure(const Instruction& input, u32 re
         break;
     case 0x321:
         operand(16, input.Bits(74, 2) + 1);
+        operand(24);
+        operand(32);
+        break;
+    case 0x322:
+        operand(24);
+        operand(32, input.Bits(74, 2) + 1);
+        break;
+    case 0x927:
         operand(24);
         operand(32);
         break;
@@ -99,6 +112,8 @@ inline RegisterPressure PrepareRegisterPressure(const Instruction& input, u32 re
         operand(24);
         break;
     case 0x308:
+    case 0x202:
+    case 0x243:
     case 0x245:
     case 0x305:
     case 0x306:

@@ -531,6 +531,41 @@ struct HalfIR {
 };
 } // namespace
 
+TEST_CASE("Ocarina packed float-to-byte conversion clamps before packing", "[video_core][ampere][oot]") {
+    const Instruction convert{{0xff0a7243, 9, 0x0000c4ff, 0x000fe400}};
+    const auto lowered = LowerToMaxwell(std::array{convert, Exit});
+    INFO(lowered.error);
+    REQUIRE(lowered);
+    HalfIR translation{lowered.instructions};
+    for (const f32 input : {-std::numeric_limits<f32>::infinity(), -255.0f, -0.5f, 0.0f, 0.5f,
+                            1.0f, 127.75f, 255.0f, 255.75f, 256.0f,
+                            std::numeric_limits<f32>::infinity(),
+                            std::numeric_limits<f32>::quiet_NaN()}) {
+        const u32 expected = std::isnan(input) ? 0U : u32(std::clamp(input, 0.0f, 255.0f));
+        CHECK(translation.Run(std::bit_cast<u32>(input), 9, 10) == expected);
+    }
+}
+
+TEST_CASE("Ocarina uniform multiply adds an immediate rather than reading a register",
+          "[video_core][ampere][oot]") {
+    const Instruction multiply{{0x040474a4, 0x00003c00, 0x0f8e0206, 0x000fc600}};
+    const auto lowered = LowerToMaxwell(std::array{multiply, Exit});
+    INFO(lowered.error);
+    REQUIRE(lowered);
+    for (const u32 a : {0U, 1U, 0x80000000U, 0xffffffffU}) {
+        for (const u32 b : {0U, 3U, 0x40000001U, 0xffffffffU}) {
+            LoggedMachine machine;
+            machine.registers[0][220] = a;
+            machine.registers[0][222] = b;
+            const auto predicates = machine.predicates;
+            machine.Run(lowered.instructions);
+            CHECK(machine.registers[0][220] == a * b + 0x3c00U);
+            CHECK(machine.registers[0][222] == b);
+            CHECK(machine.predicates == predicates);
+        }
+    }
+}
+
 TEST_CASE("Ampere F2I signed byte clamps to the byte range", "[video_core][ampere]") {
     const Instruction convert{{0x00097305, 5, 0x0021e100, 0}};
     const auto lowered = LowerToMaxwell(std::array{convert, Exit});
