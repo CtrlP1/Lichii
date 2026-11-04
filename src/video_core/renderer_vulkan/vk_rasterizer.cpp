@@ -329,7 +329,7 @@ void RasterizerVulkan::NoteResolvedDraw(GraphicsPipeline* pipeline, bool is_inde
         if (is_indirect) return Ineligible::Indirect;
         if (mesh_draw) return Ineligible::Mesh;
         if (!pipeline->IsBuilt()) return Ineligible::NotBuilt;
-        if (pipeline->WritesStorage()) return Ineligible::WritesStorage;
+        if (pipeline->WritesImages()) return Ineligible::WritesImages;
         if (maxwell3d->regs.transform_feedback_enabled != 0) return Ineligible::TransformFeedback;
         if (!draw_state.inline_index_draw_indexes.empty()) return Ineligible::InlineIndex;
         if (topology == Maxwell::PrimitiveTopology::Quads ||
@@ -385,7 +385,7 @@ void RasterizerVulkan::ReportFastDraws() {
              per_second(FullDraw::HandleBind), per_second(FullDraw::HandleData),
              per_second(FullDraw::DeltaBuffers));
     static constexpr std::array<const char*, static_cast<size_t>(Ineligible::Count)>
-        ineligible_names{"indirect",       "mesh",          "not built",     "writes storage",
+        ineligible_names{"indirect",       "mesh",          "not built",     "writes images",
                          "transform feedback", "inline index", "quads",       "repacked vertices",
                          "no render pass", "pipeline not bound", "off the back thread"};
     std::string ineligible;
@@ -406,8 +406,7 @@ void RasterizerVulkan::ReportFastDraws() {
     const u64 all_ns = stats.prepare_ns[0] + stats.prepare_ns[1] + stats.prepare_ns[2];
     static constexpr std::array<const char*,
                                 static_cast<size_t>(GraphicsPipeline::DeltaBlocker::Count)>
-        blocker_names{"none",          "writes storage",  "mesh",          "storage buffers",
-                      "texture buffers", "image buffers", "computed handles", "not configured"};
+        blocker_names{"none", "writes images", "mesh", "computed handles", "not configured"};
     std::string blockers;
     for (size_t blocker = 0; blocker < stats.delta_blockers.size(); ++blocker) {
         if (stats.delta_blockers[blocker] != 0) {
@@ -425,11 +424,13 @@ void RasterizerVulkan::ReportFastDraws() {
     if (VideoCommon::Nx2FastDraw::g_verify) {
         LOG_INFO(Render_Vulkan,
                  "Fast draw verify per second: {:.0f} checked, {:.0f} pipeline mismatches, {:.0f} "
-                 "view or sampler mismatches (totals {} {} {})",
+                 "view or sampler mismatches, {:.0f} kept buffer binding mismatches (totals {} {} "
+                 "{} {})",
                  static_cast<double>(stats.verified) / seconds,
                  static_cast<double>(stats.pipeline_mismatches) / seconds,
-                 static_cast<double>(stats.view_mismatches) / seconds, stats.verified,
-                 stats.pipeline_mismatches, stats.view_mismatches);
+                 static_cast<double>(stats.view_mismatches) / seconds,
+                 static_cast<double>(stats.binding_mismatches) / seconds, stats.verified,
+                 stats.pipeline_mismatches, stats.view_mismatches, stats.binding_mismatches);
     }
     std::string breaks;
     for (size_t reason = 0; reason < stats.breaks.size(); ++reason) {
@@ -592,6 +593,7 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
     };
     ReusableTake take = FastDraw::g_enabled ? TakeReusableDraw(is_indexed, is_indirect) : ReusableTake{};
     // EDEN_NX2_FAST_DRAW_VERIFY: resolve in full and compare with what reuse would have kept.
+    const ReusableTake verify_take = take;
     GraphicsPipeline* const verify_pipeline = FastDraw::g_verify ? std::exchange(take.pipeline, nullptr) : nullptr;
     GraphicsPipeline* const pipeline{take.pipeline ? take.pipeline : [&] {
         Profile::Scope scope{Profile::Zone::PipelineLookup};
@@ -668,6 +670,14 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
                 }
             }
         }
+        // What the reused or delta draw would have kept: a delta draw binds the vertex buffers
+        // again after a vertex stream change and the storage buffers always.
+        const bool verify_bindings = verify_pipeline != nullptr && verify_pipeline == pipeline;
+        const bool keeps_vertex = !verify_take.delta || !verify_take.vertex_buffers;
+        const bool keeps_storage = !verify_take.delta;
+        const u64 kept_bindings =
+            verify_bindings ? buffer_cache.KeptGraphicsBindingsHash(keeps_vertex, keeps_storage, true)
+                            : 0;
         if (verify_views) {
             pipeline->VerifyNextDelta();
         }
@@ -678,6 +688,10 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
         }
         if (verify_views && pipeline->DeltaMismatch()) {
             ++fast_draw_stats.view_mismatches;
+        }
+        if (verify_bindings &&
+            kept_bindings != buffer_cache.KeptGraphicsBindingsHash(keeps_vertex, keeps_storage, true)) {
+            ++fast_draw_stats.binding_mismatches;
         }
     }
 

@@ -302,29 +302,38 @@ GraphicsPipeline::GraphicsPipeline(
         return info.stores_global_memory || any_written(info.storage_buffers_descriptors) ||
                any_written(info.image_descriptors) || any_written(info.image_buffer_descriptors);
     });
+    writes_images = std::ranges::any_of(stage_infos, [&](const Shader::Info& info) {
+        return any_written(info.image_descriptors) || any_written(info.image_buffer_descriptors);
+    });
     const auto block = [&](DeltaBlocker blocker) {
         if (delta_blocker == DeltaBlocker::None) {
             delta_blocker = blocker;
         }
     };
-    if (writes_storage) {
-        block(DeltaBlocker::WritesStorage);
+    if (writes_images) {
+        block(DeltaBlocker::WritesImages);
     }
     if (IsMeshPipeline()) {
         block(DeltaBlocker::Mesh);
     }
     for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
         const Shader::Info& info = stage_infos[stage];
-        if (!info.storage_buffers_descriptors.empty()) {
-            block(DeltaBlocker::StorageBuffers);
-        }
-        if (!info.texture_buffer_descriptors.empty()) {
-            block(DeltaBlocker::TextureBuffers);
-        }
-        if (!info.image_buffer_descriptors.empty()) {
-            block(DeltaBlocker::ImageBuffers);
-        }
         u32& handles = handle_constant_buffers[stage];
+        for (const auto& desc : info.texture_buffer_descriptors) {
+            if (desc.handle_program != ~0U) {
+                block(DeltaBlocker::ComputedHandles);
+            }
+            handles |= 1U << desc.cbuf_index;
+            if (desc.has_secondary) {
+                handles |= 1U << desc.secondary_cbuf_index;
+            }
+        }
+        for (const auto& desc : info.image_buffer_descriptors) {
+            if (desc.handle_program != ~0U) {
+                block(DeltaBlocker::ComputedHandles);
+            }
+            handles |= 1U << desc.cbuf_index;
+        }
         for (const auto& desc : info.texture_descriptors) {
             if (desc.handle_program != ~0U) {
                 block(DeltaBlocker::ComputedHandles);
@@ -727,8 +736,24 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
 GraphicsPipeline::DeltaResult GraphicsPipeline::ConfigureDelta() {
     namespace Profile = VideoCommon::Nx2Profile;
     {
+        Profile::Scope scope{Profile::Zone::ReadHandles};
+        for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
+            const auto& descriptors = stage_infos[stage].storage_buffers_descriptors;
+            if (!configured_stages[stage] || descriptors.empty()) {
+                continue;
+            }
+            buffer_cache.UnbindGraphicsStorageBuffers(stage);
+            size_t ssbo_index{};
+            for (const auto& desc : descriptors) {
+                buffer_cache.BindGraphicsStorageBuffer(stage, ssbo_index, desc.cbuf_index,
+                                                       desc.cbuf_offset, desc.is_written);
+                ++ssbo_index;
+            }
+        }
+    }
+    {
         Profile::Scope scope{Profile::Zone::UpdateBuffers};
-        if (!buffer_cache.UpdateGraphicsUniformBuffers()) {
+        if (!buffer_cache.UpdateGraphicsStageBuffers()) {
             return DeltaResult::NeedsFull;
         }
     }

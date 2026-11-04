@@ -386,8 +386,11 @@ public:
     /// Updates and binds the vertex buffers whose registers changed; false when that created or
     /// deleted buffers.
     [[nodiscard]] bool RebindVertexBuffers();
-    /// Resolves rebound graphics uniform buffers; false when that created or deleted buffers.
-    [[nodiscard]] bool UpdateGraphicsUniformBuffers();
+    /// Resolves the graphics uniform, storage and texture buffers bound since the last draw;
+    /// false when that created or deleted buffers.
+    [[nodiscard]] bool UpdateGraphicsStageBuffers();
+    /// EDEN_NX2_FAST_DRAW_VERIFY: a hash of the bindings a reused or delta draw keeps.
+    [[nodiscard]] u64 KeptGraphicsBindingsHash(bool vertex, bool storage, bool texture) const;
 
     template <typename Func>
     void BufferOperations(Func&& func) {

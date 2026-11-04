@@ -301,7 +301,7 @@ private:
         Indirect,
         Mesh,
         NotBuilt,
-        WritesStorage,
+        WritesImages,
         TransformFeedback,
         InlineIndex,
         Quads,
@@ -324,6 +324,7 @@ private:
         u64 verified{};
         u64 pipeline_mismatches{};
         u64 view_mismatches{};
+        u64 binding_mismatches{};
         /// DeltaPipeline draws by GraphicsPipeline::DeltaDrawBlocker.
         std::array<u64, static_cast<size_t>(GraphicsPipeline::DeltaBlocker::Count)> delta_blockers{};
         /// StateChanged draws by the reason of the last break, and by its 3D method.
