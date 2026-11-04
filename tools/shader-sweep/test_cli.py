@@ -118,6 +118,48 @@ class CliTests(unittest.TestCase):
         self.assertIsNone(result["stage"])
         self.assertEqual(self.output.read_bytes(), struct.pack("<Q", MAXWELL_EXIT))
 
+    def test_oot_extended_compare_accumulation(self):
+        for control in (0x08f25120, 0x08f05100, 0x08705130, 0x09725110,
+                        0x09f05100, 0x09f45120, 0x0a745120):
+            with self.subTest(control=hex(control)):
+                source = self.write("oot-compare.bin", struct.pack(
+                    "<4I", 0xff007c0c, 9, control, 0x000fe400) + NATIVE_EXIT)
+                capture = self.write("shader.env", environment(50, 4))
+                self.run_cli(source, "--environment", capture, "--cache-version", 50,
+                             "--output", self.output)
+                self.validate()
+
+    def test_oot_shadowed_register_forms(self):
+        instructions = (
+            (0x2fe97a20, 0x01401200, 0x00410000, 0x000fe200),
+            (0xfff47321, 0x000100ff, 0x00000400, 0x000fe200),
+            (0x07f57a23, 0x00c01e00, 0x00010018, 0x040fe200),
+            (0x14f37621, 0x01001000, 0x00010000, 0x000fe200),
+        )
+        uniform_move = struct.pack("<4I", 0x00007c02, 0, 0x08000f00, 0)
+        for instruction in instructions:
+            with self.subTest(opcode=hex(instruction[0] & 0xfff)):
+                source = self.write("oot-shadow.bin", uniform_move +
+                                    struct.pack("<4I", *instruction) + NATIVE_EXIT)
+                self.run_cli(source, "--lower-only", self.output)
+
+    def test_oot_global_reduction_forms(self):
+        instructions = (
+            (0xff00798e, 9, 0x0c10e704, 0x0021e800),
+            (0x0c00098e, 0xfffff007, 0x0010e100, 0x0011e400),
+        )
+        for instruction in instructions:
+            with self.subTest(instruction=instruction):
+                source = self.write("oot-reduction.bin", struct.pack(
+                    "<4I", *instruction) + NATIVE_EXIT)
+                self.run_cli(source, "--lower-only", self.output)
+                words = struct.unpack("<" + "Q" * (self.output.stat().st_size // 8),
+                                      self.output.read_bytes())
+                reduction = next(word for word in words if word >> 51 == 0xebf8000000000000 >> 51)
+                self.assertEqual((reduction >> 20) & 7, 3 if instruction[2] == 0x0c10e704 else 0)
+                self.assertEqual((reduction >> 28) & 0xfffff,
+                                 0 if instruction[2] == 0x0c10e704 else 0xffff0)
+
     def test_instruction_only_requires_stage(self):
         source = self.write("native.bin", NATIVE_EXIT)
         self.run_cli(source, "--output", self.output, code=2)

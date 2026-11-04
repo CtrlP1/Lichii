@@ -489,6 +489,33 @@ TEST_CASE("Global loads do not emit unused atomic helpers", "[shader][spirv][glo
     CHECK(Instructions(code, 234).empty());
 }
 
+TEST_CASE("Global unsigned atomic max routes buffers and returns the old value",
+          "[shader][spirv][global_atomic][oot]") {
+    for (const bool native : {false, true}) {
+        for (const bool aliases : {false, true}) {
+            CAPTURE(native, aliases);
+            GlobalAtomicProgram fixture{native};
+            fixture.profile.support_descriptor_aliasing = aliases;
+            for (auto& inst : fixture.block.Instructions()) {
+                if (inst.GetOpcode() == IR::Opcode::GlobalAtomicIAdd32) {
+                    inst.ReplaceOpcode(IR::Opcode::GlobalAtomicUMax32);
+                }
+            }
+            const auto code = Backend::SPIRV::EmitSPIRV(fixture.profile, fixture.program);
+            const auto atomics = Instructions(code, 239);
+            REQUIRE(atomics.size() == (native ? 3 : 2));
+            CHECK(Instructions(code, 234).empty());
+            const auto returns = Instructions(code, 254);
+            for (const auto& atomic : atomics) {
+                REQUIRE(atomic.size() == 6);
+                CHECK(std::ranges::any_of(returns, [&](const auto& returned) {
+                    return returned.size() == 1 && returned[0] == atomic[1];
+                }));
+            }
+        }
+    }
+}
+
 TEST_CASE("Global atomic routing works without descriptor aliases",
           "[shader][spirv][global_atomic]") {
     for (const bool native : {false, true}) {
