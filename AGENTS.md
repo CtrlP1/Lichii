@@ -26,6 +26,7 @@ Users report game bugs with Lichii logs (`eden_log.txt`, `eden_log.txt.old`). Ea
 | 040004F027560000 | Orbitals Global Friends Pass |
 | 0400380020056000 | Raiders |
 | 0400D1D02399A000 | The Duskbloods network test |
+| 0400486024DEC000 | The Legend of Zelda: Ocarina of Time |
 
 Add ids here when a report identifies a new game.
 
