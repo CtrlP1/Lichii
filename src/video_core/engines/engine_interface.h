@@ -44,6 +44,11 @@ public:
     }
 
     std::bitset<(std::numeric_limits<u16>::max)()> execution_mask{};
+    /// Methods that can write memory in command order (uploads, reports, copies, dispatches):
+    /// the split's front waits for the last one sent before its macros read memory. Draws and
+    /// clears are left out: their writes are visible only after a host-level wait.
+    std::bitset<(std::numeric_limits<u16>::max)()> memory_write_mask =
+        std::bitset<(std::numeric_limits<u16>::max)()>{}.set();
     std::vector<std::pair<u32, u32>> method_sink{};
     GPUVAddr current_dma_segment;
     bool current_dirty{};
