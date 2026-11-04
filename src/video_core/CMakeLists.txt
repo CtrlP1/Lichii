@@ -114,6 +114,7 @@ add_library(video_core STATIC
     native_query_trace.h
     nx2.h
     nx2_cmdpage_diag.h
+    nx2_draw_runs.h
     nx2_profile.h
     present.h
     pte_kind.h

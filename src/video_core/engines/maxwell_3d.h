@@ -3265,6 +3265,9 @@ public:
     /// Handles a write to the CB_BIND register.
     void ProcessCBBind(size_t stage_index);
 
+    /// EDEN_NX2_DRAW_RUNS: a register write about to be applied on the back.
+    void NoteDrawRunsWrite(u32 method, u32 argument);
+
     /// Handles a write to the CB_DATA[i] register.
     void ProcessCBData(u32 value);
     void ProcessCBMultiData(const u32* start_base, u32 amount);

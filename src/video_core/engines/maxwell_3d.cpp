@@ -23,6 +23,7 @@
 #include "video_core/gpu_split.h"
 #include "video_core/memory_manager.h"
 #include "video_core/nx2_cmdpage_diag.h"
+#include "video_core/nx2_draw_runs.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/query_cache/frame_trace.h"
 #include "video_core/rasterizer_interface.h"
@@ -335,6 +336,8 @@ void Maxwell3D::ConsumeSinkImpl(Core::System& system) {
     const auto process = [&](u32 method, u32 value) {
         if (!skip_same || regs.reg_array[method] != value) {
             ProcessDirtyRegisters(method, value);
+        } else if (VideoCommon::Nx2DrawRuns::g_enabled) [[unlikely]] {
+            VideoCommon::Nx2DrawRuns::OnWrite(method, false, false);
         }
     };
     if (control == Regs::ShadowRamControl::Track || control == Regs::ShadowRamControl::TrackWithFilter) {
@@ -359,9 +362,55 @@ void Maxwell3D::ProcessDirtyRegisters(u32 method, u32 argument) {
     if (draw_manager.HasDeferredDraw() && !DrawManager::IsInstanceLoopMethod(method)) [[unlikely]] {
         draw_manager.DrawDeferred(*this, true);
     }
+    if (VideoCommon::Nx2DrawRuns::g_enabled) [[unlikely]] {
+        NoteDrawRunsWrite(method, argument);
+    }
     regs.reg_array[method] = argument;
     for (auto const& table : dirty.tables)
         dirty.flags[table[method]] = true;
+}
+
+void Maxwell3D::NoteDrawRunsWrite(u32 method, u32 argument) {
+    namespace Runs = VideoCommon::Nx2DrawRuns;
+    const bool changed = regs.reg_array[method] != argument;
+    Runs::OnWrite(method, changed, true);
+    constexpr u32 cb_data = MAXWELL3D_REG_INDEX(const_buffer.buffer);
+    if ((method >= cb_data && method < cb_data + Regs::NumCBData) ||
+        method == MAXWELL3D_REG_INDEX(inline_data) || method == RootTables::LoadMethod) {
+        Runs::OnData(sizeof(u32));
+        return;
+    }
+    switch (method) {
+    case MAXWELL3D_REG_INDEX(fragment_barrier):
+    case MAXWELL3D_REG_INDEX(tiled_cache_barrier):
+    case MAXWELL3D_REG_INDEX(invalidate_texture_data_cache):
+        Runs::OnBreak(Runs::Break::Barrier);
+        return;
+    case MAXWELL3D_REG_INDEX(const_buffer.size):
+    case MAXWELL3D_REG_INDEX(const_buffer.address_high):
+    case MAXWELL3D_REG_INDEX(const_buffer.address_low):
+    case MAXWELL3D_REG_INDEX(const_buffer.offset):
+    case MAXWELL3D_REG_INDEX(bind_groups[0].raw_config):
+    case MAXWELL3D_REG_INDEX(bind_groups[1].raw_config):
+    case MAXWELL3D_REG_INDEX(bind_groups[2].raw_config):
+    case MAXWELL3D_REG_INDEX(bind_groups[3].raw_config):
+    case MAXWELL3D_REG_INDEX(bind_groups[4].raw_config):
+    case MAXWELL3D_REG_INDEX(report_semaphore.query):
+    case MAXWELL3D_REG_INDEX(clear_report_value):
+    case MAXWELL3D_REG_INDEX(sync_info):
+    case MAXWELL3D_REG_INDEX(wait_for_idle):
+    case MAXWELL3D_REG_INDEX(launch_dma):
+    case MAXWELL3D_REG_INDEX(clear_surface):
+    case MAXWELL3D_REG_INDEX(global_base_vertex_index):
+    case MAXWELL3D_REG_INDEX(global_base_instance_index):
+    case RootTables::SelectMethod:
+        return;
+    default:
+        break;
+    }
+    if (changed && !DrawManager::IsInstanceLoopMethod(method)) {
+        Runs::OnBreak(Runs::Break::State);
+    }
 }
 
 void Maxwell3D::ProcessMethodCall(u32 method, u32 argument, u32 nonshadow_argument, bool is_last_call) {
@@ -519,6 +568,8 @@ void Maxwell3D::CallMethod(Core::System& system, u32 method, u32 method_argument
         // ProcessMethodCall (and the draw manager behind it) acts only on executable methods.
         if (!SkipSameValueWrites() || regs.reg_array[method] != argument) {
             ProcessDirtyRegisters(method, argument);
+        } else if (VideoCommon::Nx2DrawRuns::g_enabled) [[unlikely]] {
+            VideoCommon::Nx2DrawRuns::OnWrite(method, false, false);
         }
         return;
     }
@@ -575,10 +626,16 @@ void Maxwell3D::CallMultiMethod(Core::System& system, u32 method, const u32* bas
     case MAXWELL3D_REG_INDEX(const_buffer.buffer) + 13:
     case MAXWELL3D_REG_INDEX(const_buffer.buffer) + 14:
     case MAXWELL3D_REG_INDEX(const_buffer.buffer) + 15:
+        if (VideoCommon::Nx2DrawRuns::g_enabled) [[unlikely]] {
+            VideoCommon::Nx2DrawRuns::OnData(u64{amount} * sizeof(u32));
+        }
         ProcessCBMultiData(base_start, amount);
         break;
     case MAXWELL3D_REG_INDEX(inline_data): {
         ASSERT(methods_pending == amount);
+        if (VideoCommon::Nx2DrawRuns::g_enabled) [[unlikely]] {
+            VideoCommon::Nx2DrawRuns::OnData(u64{amount} * sizeof(u32));
+        }
         upload_state.ProcessData(base_start, amount);
         return;
     }
@@ -776,6 +833,11 @@ void Maxwell3D::ProcessCBBind(size_t stage_index) {
         return; // slot field is 5 bits; the state array holds 18
     }
     auto& buffer = state.shader_stages[stage_index].const_buffers[bind_data.shader_slot];
+    if (VideoCommon::Nx2DrawRuns::g_enabled) [[unlikely]] {
+        VideoCommon::Nx2DrawRuns::OnConstBufferBind(
+            buffer.enabled == (bind_data.valid.Value() != 0) &&
+            buffer.address == regs.const_buffer.Address() && buffer.size == regs.const_buffer.size);
+    }
     buffer.enabled = bind_data.valid.Value() != 0;
     buffer.address = regs.const_buffer.Address();
     buffer.size = regs.const_buffer.size;
