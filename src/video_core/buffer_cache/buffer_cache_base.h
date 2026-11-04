@@ -585,6 +585,27 @@ private:
     u64 vertex_buffers_serial = 0;
     std::array<Binding, 32> v_buffer{};
 
+    /// EDEN_NX2_BUFFER_SKIP: the inputs and result of each vertex stream's last lookup.
+    struct VertexLookup {
+        GPUVAddr begin{};
+        GPUVAddr end{};
+        const void* owner{};
+        u64 map_serial{};
+        u64 deletions{};
+        Binding binding{};
+        bool valid{};
+    };
+    std::array<VertexLookup, NUM_VERTEX_BUFFERS> vertex_lookups{};
+    u64 buffer_deletions = 0;
+    struct SkipStats {
+        u64 window_start{};
+        u64 lookups{};
+        u64 lookups_kept{};
+        u64 syncs{};
+        u64 syncs_skipped{};
+        u64 verify_mismatches{};
+    } skip_stats;
+
     boost::container::small_vector<BufferCopy, 4> upload_copies;
 
     MemoryTracker memory_tracker;

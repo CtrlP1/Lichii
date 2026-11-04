@@ -66,6 +66,14 @@ inline const bool g_verify = [] {
     return value != nullptr && value[0] == '1';
 }();
 
+/// EDEN_NX2_BUFFER_SKIP=1: the buffer cache keeps vertex buffer lookups while their registers and
+/// the page table stay the same, skips the upload scan of vertex buffers no CPU write reached, and
+/// touches each buffer's LRU entry once a frame.
+inline const bool g_buffer_skip = [] {
+    const char* const value = std::getenv("EDEN_NX2_BUFFER_SKIP");
+    return value != nullptr && value[0] == '1';
+}();
+
 inline std::atomic<u64> g_serial{1};
 /// The last break's reason and, for Register and Method, its 3D method (diagnostics).
 inline std::atomic<u32> g_last_break{};

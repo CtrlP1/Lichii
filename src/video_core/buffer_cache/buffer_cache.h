@@ -111,6 +111,24 @@ void BufferCache<P>::TickFrame() {
         return;
     }
     runtime.TickFrame(slot_buffers);
+    if (Nx2FastDraw::g_buffer_skip) [[unlikely]] {
+        const u64 now = Nx2Profile::Now();
+        if (skip_stats.window_start == 0) {
+            skip_stats.window_start = now;
+        } else if (now - skip_stats.window_start >= 10'000'000'000ULL) {
+            const double seconds = static_cast<double>(now - skip_stats.window_start) / 1e9;
+            LOG_INFO(HW_GPU,
+                     "Buffer skip per second: {:.0f} of {:.0f} vertex lookups kept, {:.0f} of "
+                     "{:.0f} vertex uploads skipped, {:.0f} verify mismatches (total {})",
+                     static_cast<double>(skip_stats.lookups_kept) / seconds,
+                     static_cast<double>(skip_stats.lookups) / seconds,
+                     static_cast<double>(skip_stats.syncs_skipped) / seconds,
+                     static_cast<double>(skip_stats.syncs) / seconds,
+                     static_cast<double>(skip_stats.verify_mismatches) / seconds,
+                     skip_stats.verify_mismatches);
+            skip_stats = SkipStats{.window_start = now};
+        }
+    }
     if (frame_tick % 600 == 0 && !uploaded_buffer_ranges.empty()) {
         for (const auto& [address, size] : uploaded_buffer_ranges) {
             device_memory.HintCold(address, size);
@@ -1138,6 +1156,10 @@ void BufferCache<P>::UpdateVertexBufferSlot(u32 index, const Binding& binding) {
     if (slot.device_addr != binding.device_addr || slot.size != binding.size) {
         ++vertex_buffers_serial;
     }
+    if (slot.device_addr != binding.device_addr || slot.size != binding.size ||
+        slot.buffer_id != binding.buffer_id) {
+        memory_tracker.ForgetSynchronized(index);
+    }
     slot = binding;
     if (binding.buffer_id != NULL_BUFFER_ID && binding.size != 0) {
         enabled_vertex_buffers_mask |= (1u << index);
@@ -1207,7 +1229,21 @@ void BufferCache<P>::BindHostVertexBuffers() {
             const Binding& binding = VertexBufferSlot(index);
             Buffer& buffer = slot_buffers[binding.buffer_id];
             TouchBuffer(buffer, binding.buffer_id);
-            SynchronizeBuffer(buffer, binding.device_addr, binding.size);
+            if (!Nx2FastDraw::g_buffer_skip) {
+                SynchronizeBuffer(buffer, binding.device_addr, binding.size);
+            } else {
+                ++skip_stats.syncs;
+                if (memory_tracker.IsSynchronized(index)) {
+                    ++skip_stats.syncs_skipped;
+                    if (Nx2FastDraw::g_verify &&
+                        !SynchronizeBuffer(buffer, binding.device_addr, binding.size)) {
+                        ++skip_stats.verify_mismatches;
+                    }
+                } else {
+                    SynchronizeBuffer(buffer, binding.device_addr, binding.size);
+                    memory_tracker.WatchSynchronized(index, binding.device_addr, binding.size);
+                }
+            }
             if (!flags[Dirty::VertexBuffer0 + index]) {
                 flush_bindings();
                 continue;
@@ -1806,12 +1842,38 @@ void BufferCache<P>::UpdateVertexBuffer(u32 index) {
         throw std::runtime_error("Native vertex stream exceeds supported 32-bit buffer size");
     }
     const GPUVAddr gpu_addr_end = native ? gpu_addr_begin + native_size : limit.Address() + 1;
+    VertexLookup& lookup = vertex_lookups[index];
+    const u64 map_serial = gpu_memory->MapSerial();
+    if (Nx2FastDraw::g_buffer_skip) {
+        ++skip_stats.lookups;
+        const GPUVAddr lookup_begin = array.enable != 0 ? gpu_addr_begin : ~GPUVAddr{0};
+        if (lookup.valid && lookup.begin == lookup_begin && lookup.end == gpu_addr_end &&
+            lookup.owner == channel_state && lookup.map_serial == map_serial &&
+            lookup.deletions == buffer_deletions) {
+            ++skip_stats.lookups_kept;
+            channel_state->vertex_buffers[index] = lookup.binding;
+            UpdateVertexBufferSlot(index, lookup.binding);
+            return;
+        }
+        lookup = VertexLookup{
+            .begin = lookup_begin,
+            .end = gpu_addr_end,
+            .owner = channel_state,
+            .map_serial = map_serial,
+            .valid = false,
+        };
+    }
     const std::optional<DAddr> device_addr = gpu_memory->GpuToCpuAddress(gpu_addr_begin);
     const u32 address_size = static_cast<u32>(gpu_addr_end - gpu_addr_begin);
     u32 size = address_size; // TODO: Analyze stride and number of vertices
     if (array.enable == 0 || size == 0 || !device_addr) {
         channel_state->vertex_buffers[index] = NULL_BINDING;
         UpdateVertexBufferSlot(index, NULL_BINDING);
+        if (Nx2FastDraw::g_buffer_skip) {
+            lookup.deletions = buffer_deletions;
+            lookup.binding = NULL_BINDING;
+            lookup.valid = true;
+        }
         return;
     }
     if (!gpu_memory->IsWithinGPUAddressRange(gpu_addr_end) || size >= 64_MiB) {
@@ -1825,6 +1887,11 @@ void BufferCache<P>::UpdateVertexBuffer(u32 index) {
     };
     channel_state->vertex_buffers[index] = binding;
     UpdateVertexBufferSlot(index, binding);
+    if (Nx2FastDraw::g_buffer_skip) {
+        lookup.deletions = buffer_deletions;
+        lookup.binding = binding;
+        lookup.valid = true;
+    }
 }
 
 template <class P>
@@ -2423,9 +2490,16 @@ void BufferCache<P>::ChangeRegister(BufferId buffer_id) {
 
 template <class P>
 void BufferCache<P>::TouchBuffer(Buffer& buffer, BufferId buffer_id) noexcept {
-    if (buffer_id != NULL_BUFFER_ID) {
-        lru_cache.Touch(buffer.getLRUID(), frame_tick);
+    if (buffer_id == NULL_BUFFER_ID) {
+        return;
     }
+    if (Nx2FastDraw::g_buffer_skip) {
+        if (buffer.touch_tick == frame_tick) {
+            return;
+        }
+        buffer.touch_tick = frame_tick;
+    }
+    lru_cache.Touch(buffer.getLRUID(), frame_tick);
 }
 
 template <class P>
@@ -2722,6 +2796,7 @@ void BufferCache<P>::DownloadBufferMemory(Buffer& buffer, DAddr device_addr, u64
 
 template <class P>
 void BufferCache<P>::DeleteBuffer(BufferId buffer_id, bool do_not_mark) {
+    ++buffer_deletions;
     if constexpr (requires { runtime.OnBufferDeleted(slot_buffers[buffer_id]); }) {
         runtime.OnBufferDeleted(slot_buffers[buffer_id]);
     }
