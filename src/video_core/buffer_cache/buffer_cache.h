@@ -572,6 +572,18 @@ bool BufferCache<P>::RebindIndexBuffer() {
 }
 
 template <class P>
+bool BufferCache<P>::RebindVertexBuffers() {
+    const size_t buffers = slot_buffers.size();
+    channel_state->has_deleted_buffers = false;
+    BufferOperations([&]() { UpdateVertexBuffers(); });
+    if (channel_state->has_deleted_buffers || slot_buffers.size() != buffers) {
+        return false;
+    }
+    BindHostVertexBuffers();
+    return true;
+}
+
+template <class P>
 bool BufferCache<P>::UpdateGraphicsUniformBuffers() {
     const size_t buffers = slot_buffers.size();
     channel_state->has_deleted_buffers = false;

@@ -302,22 +302,42 @@ GraphicsPipeline::GraphicsPipeline(
         return info.stores_global_memory || any_written(info.storage_buffers_descriptors) ||
                any_written(info.image_descriptors) || any_written(info.image_buffer_descriptors);
     });
-    delta_eligible = !writes_storage && !IsMeshPipeline();
+    const auto block = [&](DeltaBlocker blocker) {
+        if (delta_blocker == DeltaBlocker::None) {
+            delta_blocker = blocker;
+        }
+    };
+    if (writes_storage) {
+        block(DeltaBlocker::WritesStorage);
+    }
+    if (IsMeshPipeline()) {
+        block(DeltaBlocker::Mesh);
+    }
     for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
         const Shader::Info& info = stage_infos[stage];
-        delta_eligible = delta_eligible && info.storage_buffers_descriptors.empty() &&
-                         info.texture_buffer_descriptors.empty() &&
-                         info.image_buffer_descriptors.empty();
+        if (!info.storage_buffers_descriptors.empty()) {
+            block(DeltaBlocker::StorageBuffers);
+        }
+        if (!info.texture_buffer_descriptors.empty()) {
+            block(DeltaBlocker::TextureBuffers);
+        }
+        if (!info.image_buffer_descriptors.empty()) {
+            block(DeltaBlocker::ImageBuffers);
+        }
         u32& handles = handle_constant_buffers[stage];
         for (const auto& desc : info.texture_descriptors) {
-            delta_eligible = delta_eligible && desc.handle_program == ~0U;
+            if (desc.handle_program != ~0U) {
+                block(DeltaBlocker::ComputedHandles);
+            }
             handles |= 1U << desc.cbuf_index;
             if (desc.has_secondary) {
                 handles |= 1U << desc.secondary_cbuf_index;
             }
         }
         for (const auto& desc : info.image_descriptors) {
-            delta_eligible = delta_eligible && desc.handle_program == ~0U;
+            if (desc.handle_program != ~0U) {
+                block(DeltaBlocker::ComputedHandles);
+            }
             handles |= 1U << desc.cbuf_index;
         }
     }
@@ -536,7 +556,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         texture_cache.FillImageViews(std::span(views.data(), views.size()), false,
                                      Spec::has_images);
     }
-    if (delta_eligible && VideoCommon::Nx2FastDraw::g_delta_enabled) {
+    if (delta_blocker == DeltaBlocker::None && VideoCommon::Nx2FastDraw::g_delta_enabled) {
         const auto same_view = [](const VideoCommon::ImageViewInOut& lhs,
                                   const VideoCommon::ImageViewInOut& rhs) {
             return lhs.index == rhs.index && lhs.id == rhs.id;

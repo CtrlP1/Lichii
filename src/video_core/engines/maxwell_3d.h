@@ -3273,6 +3273,7 @@ public:
     static bool IsFastDrawParameter(u32 method);
     /// Methods EDEN_NX2_FAST_DRAW=2 records as light changes (constant buffer data and binds).
     static bool IsFastDrawDeltaMethod(u32 method);
+    static bool IsFastDrawVertexBuffer(u32 method);
     void NoteFastDrawConstantData(GPUVAddr begin, GPUVAddr end);
 
     /// Handles a write to the CB_DATA[i] register.

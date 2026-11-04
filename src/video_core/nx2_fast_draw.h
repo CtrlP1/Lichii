@@ -19,8 +19,9 @@
 /// serial, the command buffer, the render pass and the bound pipeline are the ones the previous
 /// draw left.
 ///
-/// EDEN_NX2_FAST_DRAW=2 also takes the delta path: index buffer registers, constant buffer binds
-/// and inline constant buffer data are light changes collected in g_delta instead of breaks, and
+/// EDEN_NX2_FAST_DRAW=2 also takes the delta path: index buffer registers, vertex stream
+/// addresses, sizes and limits, constant buffer binds and inline constant buffer data are light
+/// changes collected in g_delta instead of breaks, and
 /// so is the pre-draw invalidation of that data unless it reaches an image, a shader or a bound
 /// vertex buffer (those break). A draw after only light changes keeps the pipeline, image views,
 /// samplers and render targets, and resolves the constant buffers and the index buffer again,
@@ -90,10 +91,11 @@ struct Delta {
     std::array<GPUVAddr, MaxWrites> write_end{};
     u32 num_writes{};
     bool index_buffer{};
+    bool vertex_buffers{};
     bool invalidated{};
 
     [[nodiscard]] bool Empty() const {
-        return num_writes == 0 && !index_buffer && !invalidated &&
+        return num_writes == 0 && !index_buffer && !vertex_buffers && !invalidated &&
                (binds[0] | binds[1] | binds[2] | binds[3] | binds[4]) == 0;
     }
 };
@@ -103,6 +105,15 @@ inline Delta g_delta;
 inline void NoteIndexBuffer(u32 method) {
     if (g_delta_enabled) {
         g_delta.index_buffer = true;
+    } else {
+        Break(Reason::Register, method);
+    }
+}
+
+/// A vertex stream's address, size or limit (not its stride or enable).
+inline void NoteVertexBuffer(u32 method) {
+    if (g_delta_enabled) {
+        g_delta.vertex_buffers = true;
     } else {
         Break(Reason::Register, method);
     }

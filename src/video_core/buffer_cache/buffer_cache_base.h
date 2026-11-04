@@ -383,6 +383,9 @@ public:
     /// EDEN_NX2_FAST_DRAW: updates and binds only the index buffer for a reused indexed draw.
     /// False when that created or deleted buffers, so the draw needs a full resolve.
     [[nodiscard]] bool RebindIndexBuffer();
+    /// Updates and binds the vertex buffers whose registers changed; false when that created or
+    /// deleted buffers.
+    [[nodiscard]] bool RebindVertexBuffers();
     /// Resolves rebound graphics uniform buffers; false when that created or deleted buffers.
     [[nodiscard]] bool UpdateGraphicsUniformBuffers();
 

@@ -324,6 +324,8 @@ private:
         u64 verified{};
         u64 pipeline_mismatches{};
         u64 view_mismatches{};
+        /// DeltaPipeline draws by GraphicsPipeline::DeltaDrawBlocker.
+        std::array<u64, static_cast<size_t>(GraphicsPipeline::DeltaBlocker::Count)> delta_blockers{};
         /// StateChanged draws by the reason of the last break, and by its 3D method.
         std::array<u64, static_cast<size_t>(VideoCommon::Nx2FastDraw::Reason::Count)> breaks{};
         std::array<u32, Maxwell::NUM_REGS> break_methods{};
@@ -332,6 +334,7 @@ private:
     struct ReusableTake {
         GraphicsPipeline* pipeline{}; ///< null: resolve the draw in full
         bool delta{};                 ///< light changes since: ConfigureDelta
+        bool vertex_buffers{};        ///< a delta draw binds the vertex buffers again
     };
     /// The pipeline the draw can reuse with what the previous draw bound, if any.
     ReusableTake TakeReusableDraw(bool is_indexed, bool is_indirect);

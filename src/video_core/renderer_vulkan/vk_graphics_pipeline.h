@@ -156,7 +156,25 @@ public:
     /// image views and samplers after light changes. Storage, texture and image buffers and
     /// handles computed at draw time are resolved from constant buffers on every draw.
     [[nodiscard]] bool TakesDeltaDraws() const noexcept {
-        return delta_eligible && delta_views_valid;
+        return delta_blocker == DeltaBlocker::None && delta_views_valid;
+    }
+
+    /// Why TakesDeltaDraws is false (diagnostics).
+    enum class DeltaBlocker : u8 {
+        None,
+        WritesStorage,
+        Mesh,
+        StorageBuffers,
+        TextureBuffers,
+        ImageBuffers,
+        ComputedHandles,
+        NotConfigured,
+        Count,
+    };
+    [[nodiscard]] DeltaBlocker DeltaDrawBlocker() const noexcept {
+        return delta_blocker != DeltaBlocker::None ? delta_blocker
+               : delta_views_valid                 ? DeltaBlocker::None
+                                                   : DeltaBlocker::NotConfigured;
     }
 
     /// Constant buffer slots per stage the pipeline reads texture and image handles from.
@@ -230,7 +248,7 @@ private:
     bool fragment_has_color0_output{};
     bool writes_storage{};
 
-    bool delta_eligible{};
+    DeltaBlocker delta_blocker{};
     bool delta_views_valid{};
     bool verify_delta{};
     bool delta_mismatch{};

@@ -271,3 +271,35 @@ TEST_CASE("Fast draw mode 1 breaks on what delta mode records", "[fast_draw]") {
     CHECK_FALSE(f.Reusable());
     CHECK(FastDraw::g_delta.Empty());
 }
+
+TEST_CASE("Fast draw keeps base vertex and instance as draw parameters", "[fast_draw]") {
+    FastDrawFixture f;
+    f.DrawArrays(0, 3);
+    f.Write(MAXWELL3D_REG_INDEX(global_base_vertex_index),
+            f.Reg(MAXWELL3D_REG_INDEX(global_base_vertex_index)) + 64);
+    f.Write(MAXWELL3D_REG_INDEX(global_base_instance_index),
+            f.Reg(MAXWELL3D_REG_INDEX(global_base_instance_index)) + 1);
+    f.DrawArrays(0, 3);
+    CHECK(f.Reusable());
+}
+
+TEST_CASE("Fast draw delta mode records vertex stream addresses and sizes", "[fast_draw]") {
+    DeltaFixture f;
+    const auto stream = [](u32 index, u32 word) {
+        return static_cast<u32>(MAXWELL3D_REG_INDEX(vertex_streams) + index * 4 + word);
+    };
+    const auto light = [&](u32 method) {
+        FastDraw::g_delta = {};
+        const u64 serial = FastDraw::Serial();
+        f.Write(method, f.Reg(method) + 0x40);
+        return FastDraw::Serial() == serial && FastDraw::g_delta.vertex_buffers;
+    };
+    CHECK(light(stream(0, 1)));
+    CHECK(light(stream(3, 2)));
+    CHECK(light(0x600 / 4 + 1));          // SET_VERTEX_STREAM_SIZE_B(0)
+    CHECK(light(0x600 / 4 + 31 * 2));     // SET_VERTEX_STREAM_SIZE_A(31)
+    CHECK(light(MAXWELL3D_REG_INDEX(vertex_stream_limits) + 5 * 2 + 1));
+    CHECK_FALSE(light(stream(0, 0)));     // stride and enable
+    CHECK_FALSE(light(stream(0, 3)));     // frequency
+    CHECK_FALSE(light(0x600 / 4 + 64));   // past the sizes
+}

@@ -295,6 +295,7 @@ RasterizerVulkan::ReusableTake RasterizerVulkan::TakeReusableDraw(bool is_indexe
         return {draw.pipeline, false};
     }
     if (!draw.pipeline->TakesDeltaDraws()) {
+        ++fast_draw_stats.delta_blockers[static_cast<size_t>(draw.pipeline->DeltaDrawBlocker())];
         return full(FullDraw::DeltaPipeline);
     }
     const auto& handles = draw.pipeline->HandleConstantBuffers();
@@ -316,7 +317,7 @@ RasterizerVulkan::ReusableTake RasterizerVulkan::TakeReusableDraw(bool is_indexe
             }
         }
     }
-    return {draw.pipeline, true};
+    return {draw.pipeline, true, delta.vertex_buffers};
 }
 
 void RasterizerVulkan::NoteResolvedDraw(GraphicsPipeline* pipeline, bool is_indexed,
@@ -403,6 +404,18 @@ void RasterizerVulkan::ReportFastDraws() {
     };
     const u64 all_draws = stats.prepare_draws[0] + stats.prepare_draws[1] + stats.prepare_draws[2];
     const u64 all_ns = stats.prepare_ns[0] + stats.prepare_ns[1] + stats.prepare_ns[2];
+    static constexpr std::array<const char*,
+                                static_cast<size_t>(GraphicsPipeline::DeltaBlocker::Count)>
+        blocker_names{"none",          "writes storage",  "mesh",          "storage buffers",
+                      "texture buffers", "image buffers", "computed handles", "not configured"};
+    std::string blockers;
+    for (size_t blocker = 0; blocker < stats.delta_blockers.size(); ++blocker) {
+        if (stats.delta_blockers[blocker] != 0) {
+            blockers += fmt::format(" {} {:.0f}", blocker_names[blocker],
+                                    static_cast<double>(stats.delta_blockers[blocker]) / seconds);
+        }
+    }
+    ineligible += " | pipelines without delta draws:" + (blockers.empty() ? std::string{" none"} : blockers);
     LOG_INFO(Render_Vulkan,
              "Fast draw ineligible per second:{} | prepare us per draw: full {:.2f}, delta {:.2f}, "
              "reused {:.2f}, all {:.2f} ({:.0f} draws/s)",
@@ -616,6 +629,10 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
     DrawPath path = !take.pipeline ? DrawPath::Full : take.delta ? DrawPath::Delta : DrawPath::Reused;
     if (path != DrawPath::Full && is_indexed && !buffer_cache.RebindIndexBuffer()) {
         ++fast_draw_stats.full[static_cast<size_t>(FullDraw::IndexBuffers)];
+        path = DrawPath::Full;
+    }
+    if (path == DrawPath::Delta && take.vertex_buffers && !buffer_cache.RebindVertexBuffers()) {
+        ++fast_draw_stats.full[static_cast<size_t>(FullDraw::DeltaBuffers)];
         path = DrawPath::Full;
     }
     if (path == DrawPath::Delta) {
