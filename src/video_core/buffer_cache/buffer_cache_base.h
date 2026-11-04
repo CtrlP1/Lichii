@@ -253,6 +253,9 @@ public:
 
     void DownloadMemory(DAddr device_addr, u64 size);
 
+    /// DownloadMemory for each range, waiting for the GPU once.
+    void DownloadMemoryRanges(std::span<const std::pair<DAddr, u64>> ranges);
+
     std::optional<VideoCore::RasterizerDownloadArea> GetFlushArea(DAddr device_addr, u64 size);
 
     /// Without downloads at every fence, a guest CPU read is the only way GPU-written buffer
@@ -351,6 +354,10 @@ public:
     Nx2ListRead Nx2ReadListCopy(DAddr device_addr, std::span<u8> out, bool past_sync);
     /// Front thread, the split drained: the command list page was flushed to guest memory.
     void Nx2NoteListSynced(DAddr page);
+    /// The split's back, the front waiting on it: downloads `pages` and every page draws wrote
+    /// since it was last flushed with one GPU wait, and notes the latter synced. Each page's next
+    /// lists then read guest memory instead of draining and flushing one page at a time.
+    void Nx2FlushListPages(std::span<const DAddr> pages);
     /// CPU and inline writes: they reach guest memory, so a synced page stays synced, but its copy
     /// no longer holds the page.
     void Nx2NoteListHostWrite(DAddr device_addr, u64 size);
