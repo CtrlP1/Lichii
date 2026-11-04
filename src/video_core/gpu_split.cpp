@@ -139,6 +139,7 @@ void GpuSplit::Stop() {
     write_position = 0;
     last_writer_position = 0;
     last_sync_position = 0;
+    last_memory_write_position = 0;
     published_local = 0;
     consumed_cache = 0;
     publish_every = PublishEvery;
@@ -227,6 +228,12 @@ bool GpuSplit::WaitForSync() {
     return WaitFor(std::min(last_sync_position, write_position), DrainSite::ListSync);
 }
 
+bool GpuSplit::WaitForMemoryWriters(DrainSite site) {
+    const u64 target =
+        std::max({last_writer_position, last_sync_position, last_memory_write_position});
+    return WaitFor(std::min(target, write_position), site);
+}
+
 bool GpuSplit::WaitFor(u64 target, DrainSite site) {
     consumed_cache = consumed.load(std::memory_order_acquire);
     if (consumed_cache >= target) {
@@ -281,6 +288,9 @@ void GpuSplit::MultiMethod(Tegra::Engines::EngineInterface* engine, u32 method, 
         words += piece;
         amount -= piece;
         methods_pending -= piece;
+    }
+    if (engine->memory_write_mask[method]) {
+        last_memory_write_position = write_position;
     }
 }
 
