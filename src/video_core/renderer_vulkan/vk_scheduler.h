@@ -26,6 +26,7 @@
 #include "common/settings.h"
 #include "video_core/gpu_split.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
+#include "video_core/renderer_vulkan/vk_parallel_record.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
 namespace VideoCommon {
@@ -491,6 +492,8 @@ private:
     std::mutex queue_mutex;
     std::condition_variable_any event_cv;
     bool worker_waiting{}; ///< The worker is waiting for work (guarded by queue_mutex)
+    std::unique_ptr<ParallelRecord::SecondarySource> secondary_pools;
+    std::unique_ptr<ParallelRecord> parallel_record; ///< EDEN_NX2_PARALLEL_RECORD, worker only
     std::jthread worker_thread;
 
     std::chrono::steady_clock::duration frame_interval{};
