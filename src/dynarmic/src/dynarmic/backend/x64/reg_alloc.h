@@ -267,6 +267,7 @@ private:
     alignas(64) std::array<HostLocInfo, NonSpillHostLocCount + SpillCount> hostloc_info;
     std::bitset<32> gpr_order;
     std::bitset<32> xmm_order;
+    bool in_host_call = false;
     size_t reserved_stack_space = 0;
 };
 

@@ -347,6 +347,7 @@ void RegAlloc::HostCall(
         return ret;
     }();
 
+    in_host_call = true;
     ScratchGpr(code, ABI_RETURN);
     if (result_def)
         DefineValueImpl(code, result_def, ABI_RETURN);
@@ -386,6 +387,7 @@ void RegAlloc::HostCall(
             }
         }
     }
+    in_host_call = false;
 }
 
 void RegAlloc::AllocStackSpace(BlockOfCode& code, const size_t stack_space) noexcept {
@@ -554,19 +556,22 @@ void RegAlloc::SpillRegister(BlockOfCode& code, HostLoc loc) noexcept {
     ASSERT(!LocInfo(loc).IsLocked() && "Registers that have been allocated must not be spilt");
     if (copy_to_free_register && HostLocIsGPR(loc)) {
         // A free register is a register move away; the stack is a store now and a reload on the
-        // critical path later. Never the host call registers: memory emitters Use() a value in
-        // ABI_PARAM2, end the allocation scope and only then call HostCall, whose spill of RAX
-        // would land on that still needed but already released parameter.
-        static const std::vector<HostLoc> order = [] {
+        // critical path later. Inside HostCall never a host call register: memory emitters Use()
+        // a value in ABI_PARAM2, end the allocation scope and only then call HostCall, whose
+        // spill of RAX would land on that still needed but already released parameter.
+        static const std::vector<HostLoc> any_order{HostLoc::RBX, HostLoc::R12, HostLoc::RSI, HostLoc::RDI,
+                                                    HostLoc::R8, HostLoc::R9, HostLoc::R10, HostLoc::R11,
+                                                    HostLoc::RCX, HostLoc::RDX};
+        static const std::vector<HostLoc> call_order = [] {
             std::vector<HostLoc> r;
-            for (const HostLoc loc : {HostLoc::RBX, HostLoc::R12, HostLoc::R10, HostLoc::R11, HostLoc::R8,
-                                      HostLoc::R9, HostLoc::RSI, HostLoc::RDI, HostLoc::RCX, HostLoc::RDX}) {
+            for (const HostLoc loc : any_order) {
                 if (loc != ABI_PARAM1 && loc != ABI_PARAM2 && loc != ABI_PARAM3 && loc != ABI_PARAM4 && loc != ABI_RETURN) {
                     r.push_back(loc);
                 }
             }
             return r;
         }();
+        const std::vector<HostLoc>& order = in_host_call ? call_order : any_order;
         for (const HostLoc candidate : order) {
             if (candidate != loc && LocInfo(candidate).IsEmpty() && !LocInfo(candidate).IsLocked()) {
                 Move(code, candidate, loc);
