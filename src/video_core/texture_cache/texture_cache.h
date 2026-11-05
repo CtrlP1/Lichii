@@ -272,6 +272,12 @@ void TextureCache<P>::ApplyThresholdOverrides(bool log) {
             *target = std::strtoull(value, nullptr, 10) << 20;
         }
     }
+    // EDEN_NX2_TC_MINIMUM_MIB: below this the collector does not run at all. The default (half the
+    // device memory past a margin, ~3.3 GiB on a 24 GB card) has it delete every image unused for
+    // a few seconds, so revisited textures are created, uploaded and unswizzled again (hitches).
+    if (const char* value = std::getenv("EDEN_NX2_TC_MINIMUM_MIB")) {
+        minimum_memory = (std::min)(static_cast<u64>(std::strtoull(value, nullptr, 10)) << 20, expected_memory);
+    }
     if (log) {
         LOG_INFO(HW_GPU, "Texture cache thresholds: expected {} MiB, critical {} MiB, minimum {} MiB",
                  expected_memory >> 20, critical_memory >> 20, minimum_memory >> 20);
