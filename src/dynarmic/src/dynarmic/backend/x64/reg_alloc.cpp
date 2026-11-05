@@ -404,6 +404,7 @@ void RegAlloc::ReleaseStackSpace(BlockOfCode& code, const size_t stack_space) no
 
 // EDEN_DYN_SPILL=1: spill as before (for comparisons).
 bool copy_to_free_register = std::getenv("EDEN_DYN_SPILL") == nullptr;
+bool block_frame_pointer = std::getenv("EDEN_DYN_BLOCK_FRAME") != nullptr;
 
 bool RegAlloc::HasEmptyRegister(std::bitset<32> desired_locations) const noexcept {
     for (HostLoc i = HostLoc(0); i < HostLoc(desired_locations.size()); i = HostLoc(size_t(i) + 1)) {
