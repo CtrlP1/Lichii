@@ -629,9 +629,8 @@ namespace {
 // <title>/vulkan_used.bin: the graphics pipelines recent sessions used, as key hash + sessions
 // since the last use.
 constexpr u32 UsedPipelinesMagic = 0x31505545; // "EUP1"
-// Pipelines the last two sessions used are built at boot. Each holds ~0.45 MB of driver memory:
-// title 1 built 4,800 from eight sessions, 1.5 GB more than building them on first use (but that
-// stalled frames 4x as often), while one session of its title screen uses ~1,500.
+// Retain recent pipeline usage across launches to avoid rebuilding pipelines during gameplay.
+// Each pipeline holds ~0.45 MB of driver memory, so startup compilation is capped separately.
 // MoltenVK keeps the previous eight sessions: a pipeline built while playing goes through
 // SPIR-V -> MSL -> Metal, far more than the 2-3 ms the shorter window assumes, so each one
 // built at boot is a stutter avoided.
@@ -642,6 +641,11 @@ u8 MaxUsedPipelineAge(const Device& device) {
     return device.IsMoltenVK() ? UsedPipelinesMaxAgeMoltenVK : UsedPipelinesMaxAge;
 }
 
+// Cap startup compilation even with a used list; compile the rest on first use. A cache that grew
+// over many builds held 48k pipelines, ~21 GB of driver memory before the game started.
+constexpr size_t MaxPreloadedGraphicsPipelines = 3000;
+
+/// Loads recent pipeline hashes retained for fewer than `max_age` sessions.
 std::unordered_map<u64, u8> LoadUsedPipelines(const std::filesystem::path& path, u8 max_age) {
     std::unordered_map<u64, u8> used;
     std::ifstream file{path, std::ios::binary};
@@ -664,13 +668,6 @@ std::unordered_map<u64, u8> LoadUsedPipelines(const std::filesystem::path& path,
     }
     return used;
 }
-
-// Without a list of the pipelines recent sessions used (the first boot with this cache, or a session
-// that ended before saving it), this many cached graphics pipelines at most are built at boot and the
-// rest when first needed. A cache that grew over many builds held 48k pipelines, ~21 GB of driver
-// memory built before the game started; the list is only saved at exit or after two minutes, so a
-// boot that ran out of memory never saved one and the next boot did the same.
-constexpr size_t MaxPipelinesWithoutUsedList = 3000;
 
 // EDEN_NX2_PRELOAD_ALL_PIPELINES=1 builds every cached pipeline at boot, as before.
 bool PreloadAllPipelines() {
@@ -883,8 +880,8 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         const u64 hash = key.Hash();
         disk_pipelines.insert(hash);
         if (!PreloadAllPipelines() &&
-            (used_pipelines.empty() ? queued_graphics >= MaxPipelinesWithoutUsedList
-                                    : !used_pipelines.contains(hash))) {
+            (queued_graphics >= MaxPreloadedGraphicsPipelines ||
+             (!used_pipelines.empty() && !used_pipelines.contains(hash)))) {
             ++skipped_pipelines;
             return;
         }

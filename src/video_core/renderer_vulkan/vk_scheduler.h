@@ -119,10 +119,17 @@ public:
     void RequestOutsideRenderPassOperationContext(
         std::source_location location = std::source_location::current());
 
+    /// Defers a fragment barrier until a subsequent draw in the active render pass depends on it.
     void DeferFragmentBarrier() {
         fragment_barrier_pending = state.renderpass != VK_NULL_HANDLE;
     }
 
+    /// Returns true if a deferred fragment barrier is currently pending on the active render pass.
+    [[nodiscard]] bool HasFragmentBarrier() const noexcept {
+        return fragment_barrier_pending;
+    }
+
+    /// Clears and returns the pending deferred fragment barrier state.
     bool TakeFragmentBarrier() {
         return std::exchange(fragment_barrier_pending, false);
     }
@@ -221,6 +228,7 @@ public:
         return master_semaphore->CurrentTick();
     }
 
+    /// Monotonic counter incremented whenever command-buffer or render-pass state resets.
     [[nodiscard]] u64 RecordingEpoch() const noexcept {
         return recording_epoch;
     }

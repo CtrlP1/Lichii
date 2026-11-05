@@ -56,6 +56,7 @@ struct EnvironmentInfo {
 
 EnvironmentInfo DetectEnvironment(const VideoCore::RendererBase& renderer);
 
+/// Applies per-title settings overrides needed prior to kernel, CPU JIT, and GPU initialization.
 void LoadEarlyOverrides(std::uint64_t program_id);
 void LoadOverrides(std::uint64_t program_id, const VideoCore::RendererBase& renderer);
 

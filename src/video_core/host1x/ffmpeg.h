@@ -191,12 +191,18 @@ public:
         return m_decode_order;
     }
 
+    /// Returns true if the last SendPacket or ReceiveFrame encountered a non-EAGAIN/EOF error.
+    [[nodiscard]] bool HadDecodeError() const noexcept {
+        return m_had_decode_error;
+    }
+
 private:
     const Decoder& m_decoder;
     AVCodecContext* m_codec_context{};
     std::shared_ptr<Frame> m_final_frame{};
     std::shared_ptr<Frame> m_temp_frame{};
     bool m_decode_order{};
+    bool m_had_decode_error{};
 };
 
 struct FrameOffsets {

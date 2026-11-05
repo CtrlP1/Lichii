@@ -173,7 +173,7 @@ Decoder::Decoder(Tegra::Host1x::NvdecCommon::VideoCodec codec, bool prefer_hw) {
     }();
 
 #if defined(__ANDROID__)
-    if (Settings::values.nvdec_emulation.GetValue() == Settings::NvdecEmulation::Gpu) {
+    if (prefer_hw) {
         const char* mc_name = nullptr;
         switch (av_codec) {
         case AV_CODEC_ID_H264: mc_name = "h264_mediacodec"; break;
@@ -330,8 +330,11 @@ bool DecoderContext::OpenContext(const Decoder& decoder, std::span<const u8> ext
 }
 
 bool DecoderContext::SendPacket(const Packet& packet) {
-    if (const int ret = avcodec_send_packet(m_codec_context, packet.GetPacket()); ret < 0 && ret != AVERROR_EOF && ret != AVERROR(EAGAIN)) {
+    m_had_decode_error = false;
+    if (const int ret = avcodec_send_packet(m_codec_context, packet.GetPacket());
+        ret < 0 && ret != AVERROR_EOF && ret != AVERROR(EAGAIN)) {
         LOG_ERROR(HW_GPU, "avcodec_send_packet error: {}", AVError(ret));
+        m_had_decode_error = true;
         return false;
     }
 
@@ -339,10 +342,12 @@ bool DecoderContext::SendPacket(const Packet& packet) {
 }
 
 std::shared_ptr<Frame> DecoderContext::ReceiveFrame() {
+    m_had_decode_error = false;
     auto ReceiveImpl = [&](AVFrame* frame) -> int {
         const int ret = avcodec_receive_frame(m_codec_context, frame);
         if (ret < 0 && ret != AVERROR_EOF && ret != AVERROR(EAGAIN)) {
             LOG_ERROR(HW_GPU, "avcodec_receive_frame error: {}", AVError(ret));
+            m_had_decode_error = true;
         }
         return ret;
     };
@@ -361,6 +366,7 @@ std::shared_ptr<Frame> DecoderContext::ReceiveFrame() {
         m_final_frame->SetFormat(PreferredGpuFormat);
         if (const int ret = av_hwframe_transfer_data(m_final_frame->GetFrame(), m_temp_frame->GetFrame(), 0); ret < 0) {
             LOG_ERROR(HW_GPU, "av_hwframe_transfer_data error: {}", AVError(ret));
+            m_had_decode_error = true;
             return {};
         }
         av_frame_copy_props(m_final_frame->GetFrame(), m_temp_frame->GetFrame());
@@ -386,7 +392,8 @@ void DecodeApi::Reset() {
 
 bool DecodeApi::Initialize(Tegra::Host1x::NvdecCommon::VideoCodec codec) {
     this->Reset();
-    m_decoder.emplace(codec);
+    m_decoder.emplace(codec,
+                      Settings::values.nvdec_emulation.GetValue() == Settings::NvdecEmulation::Gpu);
     m_decoder_context.emplace(*m_decoder);
 
     bool is_mediacodec = false;

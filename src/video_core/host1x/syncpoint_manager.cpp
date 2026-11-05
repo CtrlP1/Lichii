@@ -20,7 +20,9 @@ SyncpointManager::ActionHandle SyncpointManager::RegisterAction(
     }
 
     std::scoped_lock lk(guard);
-    if (syncpoint.load(std::memory_order_relaxed) >= expected_value) {
+    pending_waiters.fetch_add(1, std::memory_order_seq_cst);
+    if (syncpoint.load(std::memory_order_seq_cst) >= expected_value) {
+        pending_waiters.fetch_sub(1, std::memory_order_relaxed);
         action();
         return {};
     }
@@ -31,7 +33,6 @@ SyncpointManager::ActionHandle SyncpointManager::RegisterAction(
         }
         ++it;
     }
-    pending_waiters.fetch_add(1, std::memory_order_seq_cst);
     return action_storage.emplace(it, expected_value, ++last_action_id, std::move(action))->id;
 }
 

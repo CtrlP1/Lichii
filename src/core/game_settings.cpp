@@ -159,12 +159,15 @@ void LoadEarlyOverrides(std::uint64_t program_id) {
                 Settings::values.skip_cpu_inner_invalidation.SetGlobal(false);
                 Settings::values.skip_cpu_inner_invalidation.SetValue(true);
             }
-            if (Settings::values.vsync_mode.GetValue() == Settings::VSyncMode::Fifo) {
+            if (Settings::values.vsync_mode.UsingGlobal() &&
+                Settings::values.vsync_mode.GetValue() == Settings::VSyncMode::Fifo) {
                 Settings::values.vsync_mode.SetGlobal(false);
                 Settings::values.vsync_mode.SetValue(Settings::VSyncMode::Mailbox);
             }
-            Settings::values.cpu_clock.SetGlobal(false);
-            Settings::values.cpu_clock.SetValue(Settings::CpuClock::Normal);
+            if (Settings::values.cpu_clock.UsingGlobal()) {
+                Settings::values.cpu_clock.SetGlobal(false);
+                Settings::values.cpu_clock.SetValue(Settings::CpuClock::Normal);
+            }
             break;
         default:
             break;

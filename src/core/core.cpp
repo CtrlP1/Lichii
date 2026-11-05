@@ -177,6 +177,18 @@ bool IsSwitch2Program(const FileSys::VirtualFile& file, u64& program_id, std::si
         const auto npdm = exefs != nullptr ? exefs->GetFile("main.npdm") : nullptr;
         return load_npdm(npdm);
     }
+    if (type == Loader::FileType::NCA) {
+        const FileSys::NCA nca{file};
+        if (nca.GetStatus() != Loader::ResultStatus::Success) {
+            return false;
+        }
+        if (program_id == 0) {
+            program_id = nca.GetTitleId();
+        }
+        const auto exefs = nca.GetExeFS();
+        const auto npdm = exefs != nullptr ? exefs->GetFile("main.npdm") : nullptr;
+        return load_npdm(npdm);
+    }
     const auto dir = file != nullptr ? file->GetContainingDirectory() : nullptr;
     const auto npdm = dir != nullptr ? dir->GetFile("main.npdm") : nullptr;
     return load_npdm(npdm);

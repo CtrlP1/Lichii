@@ -6,6 +6,13 @@ New entries go under `## [Unreleased]`; `tools/ci/bump-version.sh` turns them in
 
 ## [Unreleased]
 
+- Reduce Ocarina of Time GPU submission and timing overhead, apply inherited title settings before
+  initialization, and preserve explicit per-game choices across global configuration reloads.
+- Fix split-GPU startup waits, syncpoint callback registration races, and deferred fragment-barrier
+  lifetime; bound startup graphics-pipeline preloading while retaining recent usage across sessions.
+- Recover from hardware video-decoder startup failures by replaying buffered input through the CPU
+  decoder, including receive/transfer failures and stream resets.
+
 ## [0.1.0]
 
 - Initial release candidate

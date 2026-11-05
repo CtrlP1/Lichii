@@ -188,19 +188,24 @@ public:
     /// copy work and the work before the last host-level wait, all sent so far.
     bool WaitForMemoryWriters(DrainSite site);
 
+    /// Maps a guest semaphore address to its tracking slot in sem_write_positions.
     static constexpr size_t SemSlot(u64 addr) noexcept {
         return static_cast<size_t>(((addr >> 2) ^ (addr >> 10) ^ (addr >> 18)) & 63U);
     }
+    /// Records the ring write position of a deferred GPU semaphore or query write.
     void NoteSemaphoreWrite(u64 addr) noexcept {
         sem_write_positions[SemSlot(addr)] = write_position;
         last_release_position = write_position;
     }
+    /// Records that a compute or DMA command capable of releasing guest memory was queued.
     void NoteAnyRelease() noexcept {
         last_release_position = write_position;
     }
+    /// Returns the ring position of the most recent potential GPU release.
     [[nodiscard]] u64 LastReleasePosition() const noexcept {
         return last_release_position;
     }
+    /// Waits until the back thread has executed any queued semaphore write to the slot of `addr`.
     bool WaitForSemaphore(u64 addr, DrainSite site = DrainSite::Acquire) {
         return WaitFor(sem_write_positions[SemSlot(addr)], site);
     }
@@ -281,6 +286,8 @@ private:
     void* idle_argument{};
     alignas(64) std::atomic<bool> hook_requested{};
     std::atomic<bool> back_running{};
+    /// True when no back thread is active or after BackLoop exits; cleared before thread launch.
+    std::atomic<bool> back_exited{true};
 
     // 128 bytes: x86 spatial prefetchers pull 64-byte lines in pairs. back_waiting and wake are
     // always touched together by both threads, so they share a block.

@@ -245,13 +245,9 @@ u64 DynarmicCallbacks64::GetTicksRemaining() {
     return std::max<s64>(m_parent.m_system.CoreTiming().downcount, 0);
 }
 
-u64 DynarmicCallbacks64::GetCNTPCT() {
-    const u64 ticks = m_parent.m_system.CoreTiming().GetClockTicks();
-    // Guest code that waits by polling the counter (title 1's main thread reads it ~17 million
-    // times a second while waiting for the GPU) keeps a host core busy at full speed, and the
-    // GPU thread is often on the other half of that SMT core. Two reads within ~1.7 us of each
-    // other are such a loop: pause, which hands the core's resources to the sibling thread for a
-    // moment. The guest sees the same counter. EDEN_NX2_CNTPCT_PAUSE=0 turns it off.
+namespace {
+/// Returns true when guest CNTPCT polling loops should issue SMT pause instructions.
+bool ShouldPauseCntpctSpins() {
     static const bool pause_spins = [] {
         if (const char* value = std::getenv("EDEN_NX2_CNTPCT_PAUSE")) {
             return value[0] != '0';
@@ -263,7 +259,18 @@ u64 DynarmicCallbacks64::GetCNTPCT() {
         }
         return true;
     }();
-    if (pause_spins && ticks - m_last_cntpct < m_spin_ticks) {
+    return pause_spins;
+}
+} // namespace
+
+u64 DynarmicCallbacks64::GetCNTPCT() {
+    const u64 ticks = m_parent.m_system.CoreTiming().GetClockTicks();
+    // Guest code that waits by polling the counter (title 1's main thread reads it ~17 million
+    // times a second while waiting for the GPU) keeps a host core busy at full speed, and the
+    // GPU thread is often on the other half of that SMT core. Two reads within ~1.7 us of each
+    // other are such a loop: pause, which hands the core's resources to the sibling thread for a
+    // moment. The guest sees the same counter. EDEN_NX2_CNTPCT_PAUSE=0 turns it off.
+    if (ShouldPauseCntpctSpins() && ticks - m_last_cntpct < m_spin_ticks) {
 #if defined(_M_X64) || defined(__x86_64__)
         _mm_pause();
         _mm_pause();
@@ -374,6 +381,10 @@ void ArmDynarmic64::MakeJit(Common::PageTable* page_table, std::size_t address_s
             config.inline_cntpct_tsc_base = Common::g_wall_clock.base_rdtsc;
             config.inline_cntpct_tsc_factor =
                 Common::g_wall_clock.cntpct_rdtsc_factor.load(std::memory_order_relaxed);
+            if (ShouldPauseCntpctSpins()) {
+                config.inline_cntpct_last_ptr = &m_cb->m_last_cntpct;
+                config.inline_cntpct_spin_ticks = m_cb->m_spin_ticks;
+            }
         }
     }
 #endif
@@ -454,8 +465,10 @@ void ArmDynarmic64::MakeJit(Common::PageTable* page_table, std::size_t address_s
         }
 #endif
         if (Settings::values.cpuopt_unsafe_reduce_fp_error) {
-            config.optimizations |= Dynarmic::OptimizationFlag::Unsafe_ReducedErrorFP |
-                                    Dynarmic::OptimizationFlag::Unsafe_IgnoreStandardFPCRValue;
+            config.optimizations |= Dynarmic::OptimizationFlag::Unsafe_ReducedErrorFP;
+        }
+        if (Settings::values.cpuopt_unsafe_ignore_standard_fpcr) {
+            config.optimizations |= Dynarmic::OptimizationFlag::Unsafe_IgnoreStandardFPCRValue;
         }
         if (Settings::values.cpuopt_unsafe_inaccurate_nan) {
             config.optimizations |= Dynarmic::OptimizationFlag::Unsafe_InaccurateNaN;

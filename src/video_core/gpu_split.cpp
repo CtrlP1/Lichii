@@ -166,6 +166,7 @@ void GpuSplit::MaybeStart(Core::System& system_) {
     system = &system_;
     check_owner = std::getenv("EDEN_NX2_SPLIT_CHECK") != nullptr;
     ring = std::make_unique<u64[]>(RingWords);
+    back_exited.store(false, std::memory_order_release);
     back_thread = std::jthread([this](std::stop_token stop_token) { BackLoop(stop_token); });
     active = true;
     const char* jit = std::getenv("EDEN_NX2_MME_JIT");
@@ -183,6 +184,7 @@ void GpuSplit::Stop() {
     wake.notify_one();
     back_thread.join();
     active = false;
+    back_exited.store(true, std::memory_order_relaxed);
     // The split is static and outlives the emulation session. The next session's back thread
     // starts reading at 0: with the old positions kept it skipped through the new, empty ring a
     // wrap at a time and never reached the old write position (the next game's first GPU work
@@ -287,10 +289,10 @@ bool GpuSplit::WaitFor(u64 target, DrainSite site) {
         spins += WaitStep(consumed, consumed_cache, spins) - 1;
     }
     front_waiting.store(true, std::memory_order_seq_cst);
-    while (back_running.load(std::memory_order_acquire)) {
+    while (!back_exited.load(std::memory_order_acquire)) {
         const u32 seen = front_wake.load(std::memory_order_seq_cst);
         consumed_cache = consumed.load(std::memory_order_seq_cst);
-        if (consumed_cache >= target || !back_running.load(std::memory_order_seq_cst)) {
+        if (consumed_cache >= target || back_exited.load(std::memory_order_seq_cst)) {
             break;
         }
         front_wake.wait(seen, std::memory_order_seq_cst);
@@ -480,6 +482,7 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
         }
     }
     back_running.store(false, std::memory_order_seq_cst);
+    back_exited.store(true, std::memory_order_seq_cst);
     front_wake.fetch_add(1, std::memory_order_seq_cst);
     front_wake.notify_all();
 }
