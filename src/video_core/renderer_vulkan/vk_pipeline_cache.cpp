@@ -1240,6 +1240,17 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
         ConvertLegacyToGeneric(program, runtime_info);
         const std::vector<u32> code{EmitSPIRV(profile, runtime_info, program, binding)};
         device.SaveShader(code);
+        // EDEN_NX2_SPV_DUMP=<directory> (diagnostics): every graphics stage as it goes to the
+        // driver, written first. RADV crashes when Mesa rejects a module (spirv_to_nir returns
+        // null), so the last files name the shader; check them with spirv-val.
+        static const char* const spv_dump = std::getenv("EDEN_NX2_SPV_DUMP");
+        if (spv_dump != nullptr) [[unlikely]] {
+            std::ofstream file(fmt::format("{}/{:016x}-{:016x}-{}.spv", spv_dump, key.Hash(),
+                                           key.unique_hashes[index], stage_index),
+                               std::ios::binary | std::ios::trunc);
+            file.write(reinterpret_cast<const char*>(code.data()),
+                       static_cast<std::streamsize>(code.size() * sizeof(u32)));
+        }
         modules[stage_index] = BuildShader(device, code);
 
         // Text log + .spv dump. Text log is gated by gpu_log_level != Off; .spv dump
