@@ -1395,17 +1395,9 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
         diag_before.resize(words);
         memory_manager.ReadBlockUnsafe(source, diag_before.data(), read_bytes);
     }
-    if (VideoCommon::QueryDma::TraceEnabled()) {
+    static const bool full_drain = std::getenv("EDEN_NX2_MACRO_DMA_DRAIN") != nullptr;
+    if (full_drain) {
         split.Drain(VideoCommon::DrainSite::MacroDmaRead);
-        split.Run(
-            [this, macro, method, source, read_bytes] {
-                if (VideoCommon::QueryDma::HasPendingQueries(memory_manager, *rasterizer, source,
-                                                             read_bytes)) {
-                    VideoCommon::QueryDma::Trace(memory_manager, *rasterizer, macro, method,
-                                                 source, read_bytes);
-                }
-            },
-            VideoCommon::DrainSite::MacroDmaFlush);
     } else {
         split.WaitForSyncedWriters(VideoCommon::DrainSite::MacroDmaRead);
         split.WaitForSemaphore(source, VideoCommon::DrainSite::MacroDmaRead);
