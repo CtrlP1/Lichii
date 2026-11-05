@@ -36,6 +36,10 @@ namespace Dynarmic::Backend::X64 {
 
 class RegAlloc;
 
+/// UseScratch of a value with later uses copies it to a free register instead of spilling it.
+/// A comparison switch: blocks already compiled keep what they were compiled with.
+extern bool copy_to_free_register;
+
 struct HostLocInfo {
 public:
     HostLocInfo() {}
@@ -224,6 +228,7 @@ private:
     friend struct Argument;
 
     HostLoc SelectARegister(std::bitset<32> desired_locations) const noexcept;
+    bool HasEmptyRegister(std::bitset<32> desired_locations) const noexcept;
     std::optional<HostLoc> ValueLocation(const IR::Inst* value) const noexcept;
     HostLoc UseImpl(BlockOfCode& code, IR::Value use_value, std::bitset<32> desired_locations) noexcept;
     HostLoc UseScratchImpl(BlockOfCode& code, IR::Value use_value, std::bitset<32> desired_locations) noexcept;
