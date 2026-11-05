@@ -2,8 +2,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <atomic>
 #include <cstdlib>
 #include <thread>
+#if defined(__x86_64__) && !defined(_WIN32)
+#include <cpuid.h>
+#include <immintrin.h>
+#include <x86intrin.h>
+#endif
 
 #ifdef _MSC_VER
 #include <intrin.h>
@@ -32,6 +38,37 @@ namespace VideoCommon {
 
 namespace {
 
+#if defined(__x86_64__) && (defined(__clang__) || defined(__GNUC__)) && !defined(_WIN32)
+#define NX2_HAS_UMWAIT 1
+// UMONITOR/UMWAIT: waits for a write to the word's cache line without a system call, so the
+// writer pays nothing, and leaves the core to the SMT sibling. Waiting with PAUSE cost a saturated
+// sibling ~4-6% in a two-thread test. The deadline keeps callers polling their other conditions.
+// EDEN_NX2_UMWAIT=0: PAUSE only.
+__attribute__((target("waitpkg"))) void UmwaitImpl(const std::atomic<u64>& word, u64 seen) {
+    _umonitor(const_cast<std::atomic<u64>*>(&word));
+    if (word.load(std::memory_order_acquire) == seen) {
+        _umwait(1, __rdtsc() + 20000); // C0.1: the fastest wake-up
+    }
+}
+
+bool HasUmwait() {
+    static const bool supported = [] {
+        const char* value = std::getenv("EDEN_NX2_UMWAIT");
+        if (value != nullptr && value[0] == '0') {
+            return false;
+        }
+        unsigned eax{}, ebx{}, ecx{}, edx{};
+        return __get_cpuid_count(7, 0, &eax, &ebx, &ecx, &edx) != 0 && (ecx & (1U << 5)) != 0;
+    }();
+    return supported;
+}
+#endif
+
+/// One step of a wait for `word` to leave `seen`: PAUSE for short waits, then UMWAIT if available.
+/// Returns how many PAUSE steps it stood for: callers count spins as a time budget (the back runs
+/// its idle hook, which submits deferred fences, when its budget ends).
+u32 WaitStep(const std::atomic<u64>& word, u64 seen, u32 spins);
+
 void Pause() {
 #if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
     _mm_pause();
@@ -42,6 +79,20 @@ void Pause() {
 #else
     std::this_thread::yield();
 #endif
+}
+
+u32 WaitStep(const std::atomic<u64>& word, u64 seen, u32 spins) {
+#ifdef NX2_HAS_UMWAIT
+    if (spins >= 256 && HasUmwait()) {
+        UmwaitImpl(word, seen);
+        return 256; // up to ~8 us, about 256 PAUSEs
+    }
+#endif
+    (void)word;
+    (void)seen;
+    (void)spins;
+    Pause();
+    return 1;
 }
 
 [[maybe_unused]] std::atomic<u32> g_back_thread_id{};
@@ -214,7 +265,7 @@ void GpuSplit::Drain(DrainSite site) {
             return;
         }
         if (spins < 16384) {
-            Pause();
+            spins += WaitStep(consumed, consumed_cache, spins) - 1;
         } else {
             std::this_thread::yield();
         }
@@ -252,7 +303,7 @@ bool GpuSplit::WaitFor(u64 target, DrainSite site) {
             return true;
         }
         if (spins < 16384) {
-            Pause();
+            spins += WaitStep(consumed, consumed_cache, spins) - 1;
         } else {
             std::this_thread::yield();
         }
@@ -384,7 +435,7 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
             for (u32 spins = 0; spins < 8192 && available == read_position &&
                                 !hook_requested.load(std::memory_order_relaxed);
                  ++spins) {
-                Pause();
+                spins += WaitStep(published, available, spins) - 1;
                 available = published.load(std::memory_order_acquire);
             }
             if (available == read_position && idle_hook != nullptr) {
