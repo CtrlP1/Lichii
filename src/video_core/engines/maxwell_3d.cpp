@@ -441,6 +441,10 @@ bool Maxwell3D::IsFastDrawParameter(u32 method) {
     case MAXWELL3D_REG_INDEX(const_buffer.offset):
     case MAXWELL3D_REG_INDEX(global_base_vertex_index):
     case MAXWELL3D_REG_INDEX(global_base_instance_index):
+    // Written per draw by NVN's draw macros; only the HLE macros set it, and neither the Vulkan
+    // rasterizer nor shader translation reads it. Ocarina changes it ~64,000 times a second,
+    // which broke almost every fast draw.
+    case MAXWELL3D_REG_INDEX(vertex_id_base):
         return true;
     default:
         return DrawManager::IsInstanceLoopMethod(method) || IsFastDrawDeltaMethod(method);
