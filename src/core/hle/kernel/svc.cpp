@@ -7,6 +7,7 @@
 // DO NOT MODIFY IT MANUALLY
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <map>
@@ -2512,6 +2513,11 @@ static void Call64(Core::System& system, u32 imm, std::span<uint64_t, 8> args) {
 // records which guest thread called the function, with its return-address chain, and returns to
 // the instruction after it. Logs each new call chain (up to 64) and a summary every 10 s.
 static void Nx2Probe(Core::System& system) {
+    // One call in 256: probed functions can run hundreds of thousands of times a second.
+    static std::atomic<u64> probe_calls{};
+    if ((probe_calls.fetch_add(1, std::memory_order_relaxed) & 255) != 0) {
+        return;
+    }
     auto& kernel = system.Kernel();
     auto& process = GetCurrentProcess(kernel);
     auto& thread = GetCurrentThread(kernel);
