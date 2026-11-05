@@ -167,9 +167,9 @@ public:
         last_writer_position = write_position;
     }
     /// Waits until the back executed the compute and copy work sent so far (not what came after).
+    /// Includes writers after NoteSync; page-written flags are not authoritative before this wait.
     /// Returns whether any of it was still queued.
     bool WaitForWriters(DrainSite site = DrainSite::ListWriters);
-    bool WaitForSyncedWriters(DrainSite site = DrainSite::ListWriters);
     /// A host-level wait was just sent (a syncpoint acquire, a host WFI, a GP entry with its sync
     /// bit; semaphore acquires drain): the guest's GPU work before it is complete before the
     /// commands after it are fetched.

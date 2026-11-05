@@ -408,7 +408,12 @@ bool DecodeApi::Initialize(Tegra::Host1x::NvdecCommon::VideoCodec codec) {
     if (!is_mediacodec &&
         Settings::values.nvdec_emulation.GetValue() == Settings::NvdecEmulation::Gpu) {
         m_hardware_context.emplace();
-        m_hardware_context->InitializeForDecoder(*m_decoder_context, *m_decoder);
+        if (!m_hardware_context->InitializeForDecoder(*m_decoder_context, *m_decoder)) {
+            m_decoder_context.reset();
+            m_hardware_context.reset();
+            m_decoder.emplace(codec, false);
+            m_decoder_context.emplace(*m_decoder);
+        }
     }
 
 #if defined(__ANDROID__)

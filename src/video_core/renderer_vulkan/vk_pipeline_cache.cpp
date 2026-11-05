@@ -799,6 +799,11 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     used_pipelines_saved = std::chrono::steady_clock::now();
     size_t skipped_pipelines = 0;
     size_t queued_graphics = 0;
+    const bool preload_all = PreloadAllPipelines();
+    const bool rank_by_usage = !preload_all && !used_pipelines.empty();
+    VideoCommon::PipelinePreloadSelection selection{rank_by_usage
+                                                      ? MaxPreloadedGraphicsPipelines
+                                                      : 0};
 
     if (use_vulkan_pipeline_cache) {
         vulkan_pipeline_cache_filename =
@@ -836,7 +841,29 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         });
         ++state.total;
     }};
-    const auto load_graphics{[&](std::ifstream& file, std::vector<FileEnvironment> envs) {
+    const auto queue_graphics{[&](GraphicsPipelineCacheKey key, std::vector<FileEnvironment> envs) {
+        workers.QueueWork([this, key, envs_ = std::move(envs), &state, &callback]() mutable {
+            ShaderPools pools;
+            boost::container::static_vector<Shader::Environment*, 5> env_ptrs;
+            for (auto& env : envs_) {
+                env_ptrs.push_back(&env);
+            }
+            auto pipeline{CreateGraphicsPipeline(pools, key, MakeSpan(env_ptrs),
+                                                 state.statistics.get(), false)};
+
+            std::scoped_lock lock{state.mutex};
+            if (pipeline) {
+                graphics_cache.emplace(key, std::move(pipeline));
+            }
+            ++state.built;
+            if (state.has_loaded) {
+                callback(VideoCore::LoadCallbackStage::Build, state.built, state.total);
+            }
+        });
+        ++state.total;
+    }};
+    const auto load_graphics{[&](std::ifstream& file, std::vector<FileEnvironment> envs,
+                                std::streampos record_position) {
         GraphicsPipelineCacheKey key;
         file.read(reinterpret_cast<char*>(&key), sizeof(key));
 
@@ -879,36 +906,50 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
 
         const u64 hash = key.Hash();
         disk_pipelines.insert(hash);
-        if (!PreloadAllPipelines() &&
-            (queued_graphics >= MaxPreloadedGraphicsPipelines ||
-             (!used_pipelines.empty() && !used_pipelines.contains(hash)))) {
+        if (rank_by_usage) {
+            if (const auto used = used_pipelines.find(hash); used != used_pipelines.end()) {
+                selection.Add(used->second, hash, record_position);
+            }
+            ++skipped_pipelines;
+            return;
+        }
+        if (!preload_all && queued_graphics >= MaxPreloadedGraphicsPipelines) {
             ++skipped_pipelines;
             return;
         }
         ++queued_graphics;
-
-        workers.QueueWork([this, key, envs_ = std::move(envs), &state, &callback]() mutable {
-            ShaderPools pools;
-            boost::container::static_vector<Shader::Environment*, 5> env_ptrs;
-            for (auto& env : envs_) {
-                env_ptrs.push_back(&env);
-            }
-            auto pipeline{CreateGraphicsPipeline(pools, key, MakeSpan(env_ptrs),
-                                                 state.statistics.get(), false)};
-
-            std::scoped_lock lock{state.mutex};
-            if (pipeline) {
-                graphics_cache.emplace(key, std::move(pipeline));
-            }
-            ++state.built;
-            if (state.has_loaded) {
-                callback(VideoCore::LoadCallbackStage::Build, state.built, state.total);
-            }
-        });
-        ++state.total;
+        queue_graphics(key, std::move(envs));
     }};
     VideoCommon::LoadPipelines(stop_loading, pipeline_cache_filename, CACHE_VERSION, load_compute,
                                load_graphics);
+
+    if (rank_by_usage && !stop_loading.stop_requested()) {
+        try {
+            std::ifstream file(pipeline_cache_filename, std::ios::binary);
+            if (file.is_open()) {
+                file.exceptions(std::ifstream::failbit);
+                for (const auto& record : selection.OrderedRecords()) {
+                    if (stop_loading.stop_requested()) {
+                        break;
+                    }
+                    file.clear();
+                    file.seekg(record.position);
+                    auto envs = VideoCommon::DeserializePipelineEnvironments(file);
+                    GraphicsPipelineCacheKey key;
+                    file.read(reinterpret_cast<char*>(&key), sizeof(key));
+                    queue_graphics(key, std::move(envs));
+                    ++queued_graphics;
+                    --skipped_pipelines;
+                }
+            }
+        } catch (const std::ios_base::failure& e) {
+            LOG_ERROR(Common_Filesystem, "{}", e.what());
+            if (!Common::FS::RemoveFile(pipeline_cache_filename)) {
+                LOG_ERROR(Common_Filesystem, "Failed to delete pipeline cache file {}",
+                          Common::FS::PathToUTF8String(pipeline_cache_filename));
+            }
+        }
+    }
 
     LOG_INFO(Render_Vulkan, "Total Pipeline Count: {}", state.total);
     if (skipped_pipelines != 0) {

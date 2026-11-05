@@ -253,10 +253,6 @@ bool GpuSplit::WaitForWriters(DrainSite site) {
     return WaitFor(std::min(last_writer_position, write_position), site);
 }
 
-bool GpuSplit::WaitForSyncedWriters(DrainSite site) {
-    return WaitFor(std::min({last_writer_position, last_sync_position, write_position}), site);
-}
-
 bool GpuSplit::WaitForSync() {
     return WaitFor(std::min(last_sync_position, write_position), DrainSite::ListSync);
 }

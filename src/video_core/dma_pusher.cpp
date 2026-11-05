@@ -132,6 +132,12 @@ bool DmaPusher::Step() {
         if (fetch_drain && g_nx2_ampere.load(std::memory_order_relaxed)) {
             VideoCommon::GpuSplit::Get().Drain(VideoCommon::DrainSite::FetchDrain);
         }
+        // A queued writer may not have marked its destination pages yet. Execute all queued
+        // writers before consulting that bitmap or fetching command words, including writers
+        // queued after the last host sync.
+        if (auto& split = VideoCommon::GpuSplit::Get(); split.Active()) {
+            split.WaitForWriters();
+        }
         bool gpu_written = IsGpuWrittenCommands(dma_state.dma_get,
                                                  size_t{header.size} * sizeof(u32));
         if (subchannels[dma_state.subchannel] && dma_state.method_count) {
@@ -187,11 +193,6 @@ bool DmaPusher::Step() {
         // (the split only starts with unsafe reads; the settings can change mid-game).
         const bool use_safe = !VideoCommon::GpuSplit::Get().Active() &&
                               (Settings::IsDMALevelDefault() ? Settings::IsGPULevelHigh() : Settings::IsDMALevelSafe());
-        if (!gpu_written && VideoCommon::GpuSplit::Get().Active() &&
-            VideoCommon::GpuSplit::Get().WaitForSyncedWriters()) {
-            gpu_written =
-                IsGpuWrittenCommands(dma_state.dma_get, size_t{header.size} * sizeof(u32));
-        }
         // Resume and GPU-written entries need live words, even after a flush cleared dirty state.
         const bool submitted = (command_list.snapshot_suspensions & 1) == 0 &&
                                command_list.snapshot_suspensions ==
