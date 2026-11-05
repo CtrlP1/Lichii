@@ -245,6 +245,8 @@ public:
     }
 
     bool IsNativeMode() const { return native_mode; }
+    /// Whether the current native dispatch belongs to a recognized game DLSS evaluation.
+    bool IsDlssDispatch() const { return native_mode && dlss_chain.active; }
     bool ProcessGameDlss(u64 program_id, u64 native_key);
     void TraceDlssContract(u64 native_key, bool warn_unvalidated = true);
 
