@@ -168,7 +168,8 @@ public:
     }
     /// Waits until the back executed the compute and copy work sent so far (not what came after).
     /// Returns whether any of it was still queued.
-    bool WaitForWriters();
+    bool WaitForWriters(DrainSite site = DrainSite::ListWriters);
+    bool WaitForSyncedWriters(DrainSite site = DrainSite::ListWriters);
     /// A host-level wait was just sent (a syncpoint acquire, a host WFI, a GP entry with its sync
     /// bit; semaphore acquires drain): the guest's GPU work before it is complete before the
     /// commands after it are fetched.
@@ -187,6 +188,22 @@ public:
     /// copy work and the work before the last host-level wait, all sent so far.
     bool WaitForMemoryWriters(DrainSite site);
 
+    static constexpr size_t SemSlot(u64 addr) noexcept {
+        return static_cast<size_t>(((addr >> 2) ^ (addr >> 10) ^ (addr >> 18)) & 63U);
+    }
+    void NoteSemaphoreWrite(u64 addr) noexcept {
+        sem_write_positions[SemSlot(addr)] = write_position;
+        last_release_position = write_position;
+    }
+    void NoteAnyRelease() noexcept {
+        last_release_position = write_position;
+    }
+    [[nodiscard]] u64 LastReleasePosition() const noexcept {
+        return last_release_position;
+    }
+    bool WaitForSemaphore(u64 addr, DrainSite site = DrainSite::Acquire) {
+        return WaitFor(sem_write_positions[SemSlot(addr)], site);
+    }
 private:
     enum class Kind : u64 {
         Wrap,   ///< The rest of the ring is unused: continue at its start
@@ -247,6 +264,8 @@ private:
     u64 last_writer_position{};
     u64 last_sync_position{};
     u64 last_memory_write_position{};
+    u64 last_release_position{};
+    std::array<u64, 64> sem_write_positions{};
     u64 published_local{};
     u64 consumed_cache{};
     /// Words between publishes: small right after a drain, while the back has nothing to do.
@@ -272,6 +291,8 @@ private:
     alignas(128) std::atomic<bool> back_waiting{};
     std::atomic<u32> wake{};
     std::jthread back_thread;
+    alignas(128) std::atomic<bool> front_waiting{};
+    std::atomic<u32> front_wake{};
 };
 
 } // namespace VideoCommon
