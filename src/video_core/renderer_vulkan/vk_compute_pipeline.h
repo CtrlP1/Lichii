@@ -76,7 +76,7 @@ public:
         VideoCommon::ImageViewId id;
     };
 
-    /// The textures sampled by the last configured dispatch, kept for EDEN_NX2_FRAME_DUMP_SAMPLED.
+    /// The textures sampled by the last configured dispatch, kept while a sampled frame dump runs.
     [[nodiscard]] std::span<const SampledImage> SampledImages() const noexcept {
         return sampled_images;
     }

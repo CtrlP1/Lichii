@@ -1583,25 +1583,20 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                  (u64{operation} << 29) | (u64{dimension} << 33) | (u64{offset} << 36));
             break;
         }
-        case 0x59f: { // SURED.D.{ADD,AND,OR,XOR}.STRONG.GPU.IGN U32, direct descriptor, buffer or 2D.
+        case 0x59f: { // SURED.D.STRONG.GPU.IGN U32, direct descriptor, buffer or 2D.
             const u32 binding = insn.Bits(54, 5), offset = insn.Bits(40, 14);
             const u32 data = insn.Bits(32, 8), coordinate = insn.Bits(24, 8);
             const u32 dimension = insn.Bits(61, 3);
-            // Bits 87-90 hold the operation, numbered as Maxwell's (ADD 0, AND 5, OR 6, XOR 7);
-            // only the ones where signedness does not matter are taken.
-            const u32 operation = insn.Bits(87, 4);
-            if ((insn.words[2] & ~0x07800000U) != 0x0010e000 ||
-                (operation != 0 && operation != 5 && operation != 6 && operation != 7) ||
-                (dimension != 1 && dimension != 3) || binding >= 18 ||
+            if ((insn.words[2] & ~0x03800000U) != 0x0010e000 || (dimension != 1 && dimension != 3) || binding >= 18 ||
                 offset > 0x1fff || insn.Bits(59, 2) || coordinate > 253)
                 return fail(index, "native surface reduction mode");
             if (result.required_texture_buffer != ~0U && result.required_texture_buffer != binding)
                 return fail(index, "native surface descriptor buffer conflict");
             result.required_texture_buffer = binding;
-            // Maxwell SURED (as the frontend decodes it): operand 0-7, coordinates 8-15, ADD and
-            // U32 are zero at 24 and 20, type 33 (1 = buffer, 3 = 2D), bound offset 36, bound 51.
+            // Maxwell SURED: operand 0-7, coordinates 8-15, op 24, U32 zero at 20,
+            // type 33 (1 = buffer, 3 = 2D), bound offset 36, bound 51.
             emit(0xeb40000000000000ULL | predicate | data | (u64{coordinate} << 8) |
-                (u64{operation} << 24) | (u64{dimension} << 33) | (u64{offset} << 36) | (u64{1} << 51));
+                (u64{insn.Bits(87, 3)} << 24) | (u64{dimension} << 33) | (u64{offset} << 36) | (u64{1} << 51));
             break;
         }
         case 0x301: // BREV register.
@@ -2465,7 +2460,7 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
             }
             break;
         }
-        case 0xb63: case 0xf63: { // TLD4 (gather), 2D without depth compare; component at bits 87-88.
+        case 0xb63: case 0xf63: { // TLD4 (gather); component at bits 87-88.
             // 0xf63: the handle in a uniform register (bit 91), Maxwell TLD4.B with the handle in Rb.
             const bool bindless = opcode == 0xf63;
             const u32 handle = bindless ? uniform_register(insn.Bits(40, 6)) : 255;
@@ -2478,10 +2473,8 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
             // Bits 76-77 = 2: per-tap offsets (PTP), x and y in Ra, Ra+1 and the packed offsets in
             // Rb, Rb+1. The host gather needs them as constants, so they must be proven immediates.
             const bool per_tap = insn.Bits(76, 2) == 2;
+            const bool depth = insn.Bits(78, 1) != 0;
             const bool half = insn.Bits(79, 1) != 0;
-            // Bit 78: depth compare (as for TEX). Only the plain 2D form is lowered: x, y in
-            // Ra, Ra+1 and the reference in Rb, which Maxwell TLD4.DC reads from its meta register.
-            const bool depth_compare = insn.Bits(78, 1) != 0 && !per_tap;
             const u32 register_limit = uses_uniform_bank ? high_uniform_base : 246U;
             const bool array = insn.Bits(61, 3) == 5;
             if (bindless && array) {
@@ -2498,10 +2491,12 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                     (insn.words[3] & 0xc00001ffU))
                     return fail(index, "native uniform array texture gather mode");
             }
-            if ((insn.Bits(61, 3) != 1 && !array) || (insn.Bits(77, 1) && !per_tap) ||
-                (depth_compare && (bindless || array || offsets || half || source_a == 255 ||
-                                   source_a + 1 >= register_limit || source_b >= register_limit)) || insn.Bits(81, 3) != 7 ||
+            if ((insn.Bits(61, 3) != 1 && !array) || (insn.Bits(77, 1) && !per_tap) || insn.Bits(81, 3) != 7 ||
                 insn.Bits(59, 1) ||
+                (depth && (bindless || array || offsets || per_tap || half ||
+                           !insn.Bits(60, 1) || insn.Bits(80, 1) || insn.Bits(91, 1) ||
+                           (source_a != 255 && source_a + 2 > register_limit) ||
+                           (source_b != 255 && source_b >= register_limit))) ||
                 (array && !bindless && (!insn.Bits(60, 1) ||
                            (insn.words[2] & ~0x058000ffU) != 0x001e0f00U ||
                            source_a + 2 > register_limit || source_b >= register_limit ||
@@ -2513,9 +2508,7 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                           (source_b != 255 && source_b >= register_limit) ||
                           mask != 15 || dest >= register_limit || second_dest >= register_limit)) ||
                 (offsets && (bindless || source_b == 255 || (source_a != 255 && source_a >= 245))) ||
-                // Bit 79 is the FP16 result (handled after the gather), so per-tap only rejects
-                // bits 78 (depth compare) and 80.
-                (per_tap && (bindless || insn.Bits(78, 1) || insn.Bits(80, 1) || insn.Bits(91, 1))) ||
+                (per_tap && (bindless || depth || insn.Bits(80, 1) || insn.Bits(91, 1))) ||
                 insn.Bits(89, 1) || mask == 0 ||
                 (bindless ? (handle >= 246 || insn.Bits(46, 13) || !insn.Bits(91, 1))
                           : (insn.Bits(40, 14) > 0x1fff || binding >= 18 ||
@@ -2526,128 +2519,91 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                     source_b + 1 >= register_limit || (dest != 255 && dest + 1 >= register_limit) ||
                     (second_dest != 255 && second_dest + 1 >= register_limit))
                     return fail(index, "native per-tap gather operands");
-                // The backward scan below needs every path into the gather to run the offset
-                // definitions it finds. Straight-line programs (no control flow before the
-                // terminal EXIT; predicated EXIT and KILL only end threads) always satisfy it.
-                // Otherwise all control flow must be known (bounded_control) and no branch,
-                // call or BSSY target may sit between a definition and the gather.
-                bool terminal = false;
-                bool straight = true;
-                const Instruction* first_control = nullptr;
-                for (const auto& instruction : code) {
-                    if (instruction.Bits(12, 4) == 15) continue;
-                    const u32 op = instruction.Bits(0, 12);
-        uses_uniform_bank |= op == 0x83b && instruction.Bits(91, 1);
-                    if (op == 0x94d && instruction.Bits(12, 4) == 7) {
-                        terminal = true;
-                        break;
-                    }
-                    if (op == 0x94d || op == 0x95b) continue;
-                    if (op >= 0x940 && op <= 0x95f && straight) {
-                        straight = false;
-                        first_control = &instruction;
-                    }
-                }
-                if (!straight && !bounded_control)
-                    // Report the instruction that breaks the proof, not the gather.
-                    return fail(static_cast<u32>(first_control - code.data()),
-                                "native per-tap gather control-flow proof");
-                if (!terminal) return fail(index, "native per-tap gather terminal proof");
                 std::array<std::optional<u32>, 2> packed_offsets;
-                // A definition guarded by the gather's own predicate still reaches it, as long as
-                // nothing in between can rewrite that predicate. Instructions are checked against
-                // a list: ones with no predicate destination, and ones whose destinations sit in
-                // bits 81-83 / 84-86 (compares, PLOP3, LOP3, IADD3 carries, LEA carry). Anything
-                // else is assumed to write it.
-                const u32 gather_predicate = insn.Bits(12, 4);
-                const u32 guarded = gather_predicate & 7;
-                const auto may_write_guard = [&](const Instruction& instruction) {
-                    switch (instruction.Bits(0, 12)) {
-                    case 0x202: case 0x802: case 0xa02: case 0xc02:                // MOV
-                    case 0x224: case 0x424: case 0x624: case 0x724: case 0x824:    // IMAD
-                    case 0xa24: case 0xc24: case 0xe24: case 0x225: case 0x825:
-                    case 0x219: case 0x819: case 0xa19: case 0xc19:                // SHF
-                    case 0x220: case 0x420: case 0x620: case 0x820: case 0xa20:    // FMUL
-                    case 0x221: case 0x421: case 0x621: case 0x821: case 0xa21:    // FADD
-                    case 0x223: case 0x423: case 0x623: case 0x823: case 0xa23:    // FFMA
-                    case 0x805: case 0x919: case 0x918: case 0x91a:                // CS2R, S2R, NOP, DEPBAR
-                        return false;
-                    case 0x20c: case 0x80c: case 0xa0c: case 0xc0c:                // ISETP
-                    case 0x20b: case 0x80b: case 0xa0b: case 0xc0b:                // FSETP
-                    case 0x81c: case 0x21c:                                        // PLOP3
-                    case 0x210: case 0x810: case 0xa10: case 0xc10:                // IADD3
-                    case 0x212: case 0x812: case 0xa12: case 0xc12:                // LOP3
-                    case 0x211: case 0x811: case 0xa11: case 0xc11:                // LEA
-                        return instruction.Bits(81, 3) == guarded || instruction.Bits(84, 3) == guarded;
-                    default:
-                        return true;
-                    }
-                };
-                bool predicate_stable = true;
+                bool imad_offsets = false;
+                bool predicate_clobbered = false;
+                if (!bounded_control)
+                    return fail(index, "native per-tap gather control-flow proof");
                 for (u32 cursor = index; cursor > 0 && (!packed_offsets[0] || !packed_offsets[1]);) {
-                    // A jump landing here could skip the definitions still missing.
-                    if (!straight && control_entries[cursor])
-                        return fail(cursor, "native per-tap gather control-flow proof");
+                    if (control_entries[cursor])
+                        return fail(index, "native per-tap gather control-flow proof");
                     const auto& definition = code[--cursor];
                     if (definition.Bits(12, 4) == 15) continue;
                     const u32 op = definition.Bits(0, 12), target = definition.Bits(16, 8);
+                    u32 written_predicates = ~0U;
+                    switch (op) {
+                    case 0x802: case 0x805: case 0x819: case 0x823: case 0x91a:
+                    case 0x945: case 0x947:
+                        written_predicates = 0;
+                        break;
+                    case 0x212: case 0x812: case 0x224: case 0x424: case 0x624:
+                    case 0x824: case 0xb63:
+                        written_predicates = 1U << definition.Bits(81, 3);
+                        break;
+                    case 0x810: case 0x81c:
+                        written_predicates = (1U << definition.Bits(81, 3)) |
+                                             (1U << definition.Bits(84, 3));
+                        break;
+                    }
+                    predicate_clobbered |= (written_predicates & (1U << (native_predicate & 7))) != 0;
                     if (op == 0xb63) {
-                        if (definition.Bits(81, 3) != 7) predicate_stable = false; // sparse result
                         const u32 count = static_cast<u32>(std::popcount(definition.Bits(72, 4)));
                         const u32 high = definition.Bits(64, 8);
+                        const bool packed = definition.Bits(79, 1);
+                        const u32 first_count = packed ? (high == 255 ? (count + 1) / 2 : 1U) : high == 255 ? count : std::min(count, 2U);
+                        const u32 second_count = packed ? (count > 2 ? 1U : 0U) : count > 2 ? count - 2 : 0U;
                         for (u32 i = 0; i < 2; ++i) {
                             if (packed_offsets[i]) continue;
                             const u32 reg = source_b + i;
-                            if ((target != 255 && reg >= target &&
-                                 reg < target + (high == 255 ? count : (std::min)(count, 2U))) ||
-                                (high != 255 && count > 2 && reg >= high && reg < high + count - 2))
+                            if ((target != 255 && reg >= target && reg < target + first_count) ||
+                                (high != 255 && reg >= high && reg < high + second_count))
                                 return fail(index, "native per-tap gather offset clobber");
                         }
                         continue;
                     }
-                    // IMAD.MOV.U32 Rd, RZ, RZ, imm: the same move the 0x424 case lowers to MOV.
-                    const bool imad_move = op == 0x424 && definition.Bits(24, 8) == 255 &&
-                                           definition.words[2] == 0x078e00ff;
-                    const bool plain_move = imad_move || (op == 0x802 && !definition.Bits(24, 8) &&
-                                                          definition.words[2] == 0x00000f00);
-                    // Control flow writes no predicate; branches landing in between are rejected
-                    // above through control_entries.
-                    if (op >= 0x940 && op <= 0x95f) {
-                        // CALL and friends can run code that rewrites the predicate.
-                        if (op != 0x941 && op != 0x945 && op != 0x947 && op != 0x94d && op != 0x95b)
-                            predicate_stable = false;
-                    } else if (may_write_guard(definition)) {
-                        predicate_stable = false;
+                    auto count = write_count(definition);
+                    switch (op) {
+                    case 0x827: case 0x307: case 0x211: case 0x811: case 0xa11: case 0x624: case 0x831:
+                    case 0x832: case 0x224:
+                        count = 1;
+                        break;
+                    case 0x805:
+                        count = 2;
+                        break;
+                    case 0x945: case 0x947: case 0x91a:
+                        count = 0;
+                        break;
                     }
-                    if (op != 0x802 && op != 0x307 && op != 0x421 && op != 0xa20 && !imad_move) {
-                        // Any other instruction only has to leave the offset registers alone:
-                        // write_count knows how many registers it writes from Rd (none for
-                        // stores, compares and NOP); otherwise assume up to four, and, for
-                        // texture instructions, two more from the second destination.
-                        // Control flow (BRA, BSSY, BSYNC, EXIT, ...) writes no general register;
-                        // where it can jump is checked through control_entries above.
-                        if (op >= 0x940 && op <= 0x95f) continue;
-                        const bool texture = (op & 0x0f0) == 0x060 && (op >> 8) != 0;
-                        const u32 second = texture ? definition.Bits(64, 8) : 255U;
-                        const u32 written = write_count(definition).value_or(4U);
-                        for (u32 i = 0; i < 2; ++i) {
-                            if (packed_offsets[i]) continue;
-                            const u32 reg = source_b + i;
-                            if ((target != 255 && reg >= target && reg < target + written) ||
-                                (second != 255 && reg >= second && reg < second + 2))
-                                return fail(static_cast<u32>(cursor), "native per-tap gather offset proof");
-                        }
-                        continue;
-                    }
+                    if (!count) return fail(index, "native per-tap gather offset proof");
                     for (u32 i = 0; i < 2; ++i) {
-                        if (packed_offsets[i] || target != source_b + i) continue;
-                        const u32 guard = definition.Bits(12, 4);
-                        const bool constant =
-                            plain_move && (guard == 7 || (guard == gather_predicate && predicate_stable));
-                        if (!constant)
+                        if (packed_offsets[i] || target == 255 || source_b + i < target || source_b + i >= target + *count)
+                            continue;
+                        const bool move = op == 0x802 && !definition.Bits(24, 8) && definition.words[2] == 0xf00;
+                        const bool imad = op == 0x424 && definition.Bits(24, 8) == 255 && definition.words[2] == 0x078e00ff;
+                        const bool same_guard = imad && definition.Bits(12, 4) == native_predicate &&
+                                                !predicate_clobbered;
+                        if ((!move && !imad) || (definition.Bits(12, 4) != 7 && !same_guard) ||
+                            (definition.words[3] & 0xc00001ffU))
                             return fail(index, "native per-tap gather nonconstant offsets");
+                        imad_offsets |= imad;
                         packed_offsets[i] = definition.words[1];
                     }
+                }
+                if (!half && !imad_offsets) {
+                    bool terminal = false;
+                    for (const auto& instruction : code) {
+                        if (instruction.Bits(12, 4) == 15) continue;
+                        const u32 op = instruction.Bits(0, 12);
+                        if (op == 0x94d && instruction.Bits(12, 4) == 7) {
+                            terminal = true;
+                            break;
+                        }
+                        if (op != 0x326 && op != 0x802 && op != 0x307 && op != 0x421 &&
+                            op != 0xa20 && op != 0xb63 && op != 0x221 && op != 0x823 &&
+                            op != 0x423 && op != 0x223 && op != 0x308 && op != 0x220 && op != 0x820)
+                            return fail(index, "native per-tap gather control-flow proof");
+                    }
+                    if (!terminal) return fail(index, "native per-tap gather terminal proof");
                 }
                 for (const auto& packed : packed_offsets) {
                     if (!packed) return fail(index, "native per-tap gather missing offsets");
@@ -2659,18 +2615,18 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                     }
                 }
                 for (u32 i = 0; i < packed_offsets.size(); ++i)
-                    mov_imm(248 + i, *packed_offsets[i]);
+                    emit(0x010000000007f000ULL | (248 + i) | (u64{*packed_offsets[i]} << 20));
             }
             if (!bindless) result.required_texture_buffer = binding;
             // Two coordinates: x in Ra, y in Rb (the coordinate list splits evenly across them);
             // with an offset, x and y in Ra, Ra+1 and the offset in Rb.
-            const u32 y = !offsets && !per_tap && !depth_compare ? source_b : source_a == 255 ? 255U : source_a + 1;
+            const u32 y = !offsets && !per_tap && !depth ? source_b : source_a == 255 ? 255U : source_a + 1;
             emit(0x5c98000000000000ULL | predicate | 250 | (u64{15} << 39) | (u64{source_a} << 20));
             emit(0x5c98000000000000ULL | predicate | 251 | (u64{15} << 39) |
                  (u64{array ? source_a + 1 : y} << 20));
             if (array)
                 emit(0x5c98000000000000ULL | predicate | 252 | (u64{15} << 39) | (u64{source_b} << 20));
-            if (offsets || depth_compare) {
+            if (offsets || depth) {
                 emit(0x5c98000000000000ULL | predicate | 246 | (u64{15} << 39) | (u64{source_b} << 20));
             }
             if (bindless) {
@@ -2680,9 +2636,8 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                      (u64{insn.Bits(90, 1)} << 49) | (u64{7} << 51));
             } else {
             emit(0xc800000000000000ULL | predicate | 250 | (u64{250} << 8) |
-                 (u64{per_tap ? 248U : (offsets || depth_compare) ? 246U : 255U} << 20) | (u64{array ? 3U : 2U} << 28) |
-                 (u64{mask} << 31) | (u64{insn.Bits(40, 14)} << 36) | (u64{insn.Bits(90, 1)} << 49) |
-                 (u64{depth_compare ? 1U : 0U} << 50) | (u64{7} << 51) |
+                 (u64{per_tap ? 248U : offsets || depth ? 246U : 255U} << 20) | (u64{array ? 3U : 2U} << 28) | (u64{mask} << 31) |
+                 (u64{insn.Bits(40, 14)} << 36) | (u64{insn.Bits(90, 1)} << 49) | (u64{depth} << 50) | (u64{7} << 51) |
                  (u64{per_tap ? 2U : offsets ? 1U : 0U} << 54) | (u64{insn.Bits(87, 2)} << 56));
             }
             if (half) {
@@ -3464,9 +3419,9 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                 const bool extended = insn.Bits(74, 1) != 0;
                 const u32 high = insn.Bits(64, 8);
                 if (insn.Bits(72, 1) || insn.Bits(81, 3) != 7 ||
-                    (high != 255 && insn.Bits(73, 1)) || (opcode == 0xa11 && insn.Bits(62, 2)) ||
-                    // 0x211 bit 63 negates Rb (Rd = high word - Rb), only without .X.
+                    (high != 255 && insn.Bits(73, 1)) ||
                     (opcode == 0x211 && (insn.Bits(62, 1) || (insn.Bits(63, 1) && extended))) ||
+                    (opcode == 0xa11 && insn.Bits(62, 2)) ||
                     (opcode == 0xc11 && (insn.words[1] & ~0x3fU)))
                     return fail(index, "native high effective address mode");
                 u32 b = opcode == 0xc11 ? uniform_register(insn.Bits(32, 8)) : insn.Bits(32, 8);
@@ -3495,7 +3450,7 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                         emit(0x5c10000000000000ULL | predicate | 250 | (u64{250} << 8) | (u64{252} << 20));
                     }
                     emit(base(0x5c10000000000000ULL) | (u64{250} << 8) | (u64{b} << 20) |
-                         (u64{negate_b ? 1U : 0U} << 48));
+                         (u64{opcode == 0x211 ? insn.Bits(63, 1) : 0U} << 48));
                 }
                 break;
             }

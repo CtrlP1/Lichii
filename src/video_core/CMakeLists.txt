@@ -114,6 +114,8 @@ add_library(video_core STATIC
     native_query_trace.h
     nx2.h
     nx2_cmdpage_diag.h
+    nx2_debug_control.cpp
+    nx2_debug_control.h
     nx2_profile.h
     pending_maps.h
     present.h

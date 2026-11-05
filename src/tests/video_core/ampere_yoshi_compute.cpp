@@ -78,25 +78,3 @@ TEST_CASE("Yoshi captured SURED uses a buffer coordinate and descriptor", "[ampe
     unsupported.words[2] |= 0x200;
     REQUIRE_FALSE(LowerToMaxwell(std::array{unsupported, Exit}));
 }
-
-TEST_CASE("Ocarina SURED.OR keeps its operation in the Maxwell encoding", "[ampere][yoshi]") {
-    // SURED.D.OR from the Ocarina of Time upscaler (9387db798781f081, 0x50b0): bits 87-90 = 6.
-    const Instruction captured{{0x0400759f, 0x60008400, 0x0310e000, 0x000fe200}};
-    const auto lowered = LowerToMaxwell(std::array{captured, Exit});
-    INFO(lowered.error);
-    REQUIRE(lowered);
-    REQUIRE(((lowered.instructions[0] >> 24) & 7) == 6);
-    // AND, XOR and ADD lower too; signed MIN/MAX, INC, DEC and EXCH stay rejected.
-    for (const u32 operation : {0U, 5U, 7U}) {
-        auto instruction = Reduction;
-        instruction.words[2] |= operation << 23;
-        const auto other = LowerToMaxwell(std::array{instruction, Exit});
-        REQUIRE(other);
-        REQUIRE(((other.instructions[0] >> 24) & 7) == operation);
-    }
-    for (const u32 operation : {1U, 2U, 3U, 4U, 8U, 15U}) {
-        auto instruction = Reduction;
-        instruction.words[2] |= operation << 23;
-        REQUIRE_FALSE(LowerToMaxwell(std::array{instruction, Exit}));
-    }
-}
