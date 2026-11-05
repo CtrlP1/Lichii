@@ -49,6 +49,17 @@ public:
         Inst(Opcode::A64SetCheckBit, value);
     }
 
+    /// Leaves the block for `target` when `cond` holds on NZCV; otherwise execution goes on in
+    /// this block. `cycles`: the instructions run up to and including the branch.
+    void SideExitIf(IR::Cond cond, u64 target, u64 cycles) noexcept {
+        Inst(Opcode::A64SideExitIf, IR::Value{cond}, Imm64(target), Imm64(cycles));
+    }
+
+    /// Leaves the block for `target` when `bit` equals `exit_when`.
+    void SideExitIfBit(const IR::U1& bit, bool exit_when, u64 target, u64 cycles) noexcept {
+        Inst(Opcode::A64SideExitIfBit, bit, Imm1(exit_when), Imm64(target), Imm64(cycles));
+    }
+
     IR::U1 GetCFlag() noexcept {
         return Inst<IR::U1>(Opcode::A64GetCFlag);
     }

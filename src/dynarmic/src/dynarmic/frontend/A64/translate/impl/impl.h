@@ -26,6 +26,25 @@ struct TranslatorVisitor final {
 
     A64::IREmitter ir;
     TranslationOptions options;
+    size_t side_exits = 0;
+
+    /// Whether a conditional branch may become a side exit (see TranslationOptions::superblocks).
+    /// A block holding a side exit may be the body of a loop whose only exit is that side exit
+    /// (cbz x1, out; ...; b start), so its unconditional link must still check for halts/ticks.
+    void LinkUnconditional(u64 target) {
+        const auto next = ir.current_location->SetPC(target);
+        if (side_exits != 0) {
+            ir.SetTerm(IR::Term::LinkBlock{next});
+        } else {
+            ir.SetTerm(IR::Term::LinkBlockFast{next});
+        }
+    }
+    bool CanSideExit() const {
+        constexpr size_t MaxSideExits = 24;
+        constexpr size_t MaxInstructions = 256;
+        return options.superblocks && !ir.current_location->SingleStepping() &&
+               side_exits < MaxSideExits && ir.block.CycleCount() < MaxInstructions;
+    }
 
     bool UnpredictableInstruction();
     bool DecodeError();

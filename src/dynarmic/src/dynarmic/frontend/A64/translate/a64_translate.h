@@ -38,6 +38,10 @@ struct TranslationOptions {
     /// If this is false, we treat the instruction as a NOP.
     /// If this is true, we emit an ExceptionRaised instruction.
     bool hook_hint_instructions = true;
+
+    /// Conditional branches leave the block through a side exit and translation goes on with the
+    /// next instruction, so values stay in host registers across them (superblocks).
+    bool superblocks = false;
 };
 
 /**
