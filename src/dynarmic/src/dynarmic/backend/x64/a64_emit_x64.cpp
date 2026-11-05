@@ -122,9 +122,21 @@ A64EmitX64::BlockDescriptor A64EmitX64::Emit(IR::Block& block) noexcept {
     };
 
     bool has_side_exit = false;
-    for (auto& inst : block.instructions) {
+    for (auto it = block.instructions.begin(); it != block.instructions.end(); ++it) {
+        auto& inst = *it;
         auto const opcode = inst.GetOpcode();
         has_side_exit |= opcode == IR::Opcode::A64SideExitIf || opcode == IR::Opcode::A64SideExitIfBit;
+        // cbz/cbnz/tbz/tbnz: the test feeds only the side exit right after it, so test and jump
+        // directly instead of materializing the bit.
+        if (const auto next = std::next(it); next != block.instructions.end() &&
+            next->GetOpcode() == IR::Opcode::A64SideExitIfBit && inst.UseCount() == 1 &&
+            !next->GetArg(0).IsImmediate() && next->GetArg(0).GetInst() == &inst &&
+            EmitFusedSideExit(ctx, &inst, &*next)) {
+            has_side_exit = true;
+            ctx.reg_alloc.EndOfAllocScope();
+            it = next;
+            continue;
+        }
         // Call the relevant Emit* member function.
         switch (opcode) {
 #define OPCODE(name, type, ...) case IR::Opcode::name: goto opcode_branch;
@@ -335,6 +347,45 @@ void A64EmitX64::EmitA64SideExitIf(A64EmitContext& ctx, IR::Inst* inst) {
     default: UNREACHABLE();
     }
     EmitSideExit(ctx, exit, target, cycles);
+}
+
+bool A64EmitX64::EmitFusedSideExit(A64EmitContext& ctx, IR::Inst* test, IR::Inst* exit_inst) {
+    const IR::Opcode op = test->GetOpcode();
+    if (op != IR::Opcode::IsZero32 && op != IR::Opcode::IsZero64 && op != IR::Opcode::TestBit) {
+        return false;
+    }
+    if (test->GetArg(0).IsImmediate() || (op == IR::Opcode::TestBit && !test->GetArg(1).IsImmediate())) {
+        return false;
+    }
+    const bool exit_when = exit_inst->GetArg(1).GetU1();
+    const u64 target = exit_inst->GetArg(2).GetU64();
+    const u64 cycles = exit_inst->GetArg(3).GetU64();
+    auto args = ctx.reg_alloc.GetArgumentInfo(test);
+    const Xbyak::Reg64 value = ctx.reg_alloc.UseGpr(code, args[0]);
+    SharedLabel exit = ctx.GenSharedLabel();
+    if (op == IR::Opcode::TestBit) {
+        // The bit, set or clear, lands in CF.
+        code.bt(value, args[1].GetImmediateU8());
+        if (exit_when) {
+            code.jc(*exit, code.T_NEAR);
+        } else {
+            code.jnc(*exit, code.T_NEAR);
+        }
+    } else {
+        if (op == IR::Opcode::IsZero32) {
+            code.test(value.cvt32(), value.cvt32());
+        } else {
+            code.test(value, value);
+        }
+        // The bit is "is zero".
+        if (exit_when) {
+            code.jz(*exit, code.T_NEAR);
+        } else {
+            code.jnz(*exit, code.T_NEAR);
+        }
+    }
+    EmitSideExit(ctx, exit, target, cycles);
+    return true;
 }
 
 void A64EmitX64::EmitA64SideExitIfBit(A64EmitContext& ctx, IR::Inst* inst) {
