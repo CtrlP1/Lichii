@@ -433,6 +433,9 @@ void TextureCache<P>::TickFrame() {
                  async_decodes_queued, astc_opaque_images, astc_alpha_images);
         LOG_INFO(HW_GPU, "Texture cache last 600 frames: {} uploads from guest memory, {} MiB (largest {} MiB, {} by layer)",
                  images_uploaded, uploaded_bytes >> 20, largest_upload >> 20, layer_uploads);
+        LOG_INFO(HW_GPU, "Texture cache last 600 frames: {} images recreated, {} MiB; distinct since boot: {} images, {} MiB",
+                 images_recreated, recreated_bytes >> 20, known_images.size(), known_image_bytes >> 20);
+        images_recreated = recreated_bytes = 0;
         images_uploaded = uploaded_bytes = largest_upload = layer_uploads = 0;
         astc_opaque_images = astc_alpha_images = 0;
         std::vector<std::pair<u32, u64>> shapes;
@@ -2691,6 +2694,17 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
             shape.second = gpu_addr;
         }
         ++images_created;
+        // EDEN_NX2_TC_LOG: how much of what is created was seen before at this address and shape.
+        static const bool log_unique = std::getenv("EDEN_NX2_TC_LOG") != nullptr;
+        if (log_unique) {
+            const u64 identity = key ^ (u64{gpu_addr} * 0x9E3779B97F4A7C15ULL);
+            if (known_images.insert(identity).second) {
+                known_image_bytes += new_image.guest_size_bytes;
+            } else {
+                ++images_recreated;
+                recreated_bytes += new_image.guest_size_bytes;
+            }
+        }
     }
 
     if (!gpu_memory->IsContinuousRange(new_image.gpu_addr, new_image.guest_size_bytes) &&
