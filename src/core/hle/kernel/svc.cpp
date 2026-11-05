@@ -2512,7 +2512,53 @@ static void Call64(Core::System& system, u32 imm, std::span<uint64_t, 8> args) {
 // SVC #0xF0, installed by EDEN_NX2_PROBE at the entry of guest functions (patch_manager.cpp):
 // records which guest thread called the function, with its return-address chain, and returns to
 // the instruction after it. Logs each new call chain (up to 64) and a summary every 10 s.
+// EDEN_NX2_OOT_VFR=<min>,<max> with a probe on the frame rate controller of Ocarina of Time
+// (main+0x3b4ef60 and main+0x4dbda0, x0 = controller, x1 = framework): forces its interval bounds
+// and logs its fields. <min> 0 only logs. The game derives its time step from the rate it picks.
+static bool Nx2VfrProbe(Core::System& system) {
+    static const char* const value = std::getenv("EDEN_NX2_OOT_VFR");
+    if (value == nullptr) {
+        return false;
+    }
+    static const std::pair<u32, u32> bounds = [] {
+        char* end{};
+        const u32 min = static_cast<u32>(std::strtoul(value, &end, 10));
+        const u32 max = *end == ',' ? static_cast<u32>(std::strtoul(end + 1, nullptr, 10)) : min;
+        return std::pair{min, max};
+    }();
+    auto& kernel = system.Kernel();
+    auto& process = GetCurrentProcess(kernel);
+    ThreadContext ctx{};
+    process.GetArmInterface(kernel.CurrentPhysicalCoreIndex())->GetContext(ctx);
+    auto& memory = process.GetMemory();
+    const u64 controller = ctx.r[0];
+    const u64 framework = ctx.r[1];
+    static std::atomic<u64> calls{};
+    if ((calls.fetch_add(1, std::memory_order_relaxed) % 600) == 0) {
+        std::string words;
+        for (u32 offset = 0; offset < 0x64; offset += 4) {
+            words += fmt::format(" {:08x}", memory.Read32(controller + offset));
+        }
+        LOG_WARNING(Kernel_SVC,
+                    "nx2 vfr pc={:#x} ctrl:{} | fw 140={} 148={} 150={} 230={:02x} 231={:02x} "
+                    "232={:02x} 24f={:02x} fc={}",
+                    ctx.pc, words, memory.Read64(framework + 0x140), memory.Read64(framework + 0x148),
+                    memory.Read64(framework + 0x150), memory.Read8(framework + 0x230),
+                    memory.Read8(framework + 0x231), memory.Read8(framework + 0x232),
+                    memory.Read8(framework + 0x24f), memory.Read32(framework + 0xfc));
+    }
+    if (bounds.first != 0) {
+        memory.Write32(controller, bounds.first);
+        memory.Write32(controller + 4, bounds.second);
+        memory.Write8(controller + 0x60, 0);
+    }
+    return true;
+}
+
 static void Nx2Probe(Core::System& system) {
+    if (Nx2VfrProbe(system)) {
+        return;
+    }
     // One call in 256: probed functions can run hundreds of thousands of times a second.
     static std::atomic<u64> probe_calls{};
     if ((probe_calls.fetch_add(1, std::memory_order_relaxed) & 255) != 0) {
