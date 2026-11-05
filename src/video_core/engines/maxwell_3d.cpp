@@ -27,6 +27,7 @@
 #include "video_core/nx2_fast_draw.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/query_cache/frame_trace.h"
+#include "video_core/query_dma.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/textures/texture.h"
 #ifdef ARCHITECTURE_x86_64
@@ -1345,7 +1346,7 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
             FrontWrite(split, fs, address, value, true, true);
             // MME_DMA_READ (into data RAM) and MME_DMA_READ_FIFOED (into the load FIFO).
             if (address == 0x157 || address == 0x158) {
-                FrontDmaRead(split, fs, address, value);
+                FrontDmaRead(split, fs, method, address, value);
             }
             return true;
         };
@@ -1378,8 +1379,8 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
     }
 }
 
-void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 method,
-                             u32 count) {
+void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 macro,
+                             u32 method, u32 count) {
     // The words may be written by methods still queued for the back (indirect draw arguments
     // from a culling dispatch, constant buffer and inline uploads, reports), and the caches that
     // may hold newer ones belong to it. Draws write memory the 3D engine reads only after a
@@ -1396,7 +1397,18 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
         memory_manager.ReadBlockUnsafe(source, diag_before.data(), read_bytes);
     }
     static const bool full_drain = std::getenv("EDEN_NX2_MACRO_DMA_DRAIN") != nullptr;
-    if (full_drain) {
+    if (VideoCommon::QueryDma::TraceEnabled()) {
+        split.Drain(VideoCommon::DrainSite::MacroDmaRead);
+        split.Run(
+            [this, macro, method, source, read_bytes] {
+                if (VideoCommon::QueryDma::HasPendingQueries(memory_manager, *rasterizer, source,
+                                                             read_bytes)) {
+                    VideoCommon::QueryDma::Trace(memory_manager, *rasterizer, macro, method,
+                                                 source, read_bytes);
+                }
+            },
+            VideoCommon::DrainSite::MacroDmaFlush);
+    } else if (full_drain) {
         split.Drain(VideoCommon::DrainSite::MacroDmaRead);
     } else {
         split.WaitForSyncedWriters(VideoCommon::DrainSite::MacroDmaRead);

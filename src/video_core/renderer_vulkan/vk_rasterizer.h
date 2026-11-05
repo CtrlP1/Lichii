@@ -112,6 +112,7 @@ public:
     bool MustFlushRegion(DAddr addr, u64 size,
                          VideoCommon::CacheType which = VideoCommon::CacheType::All) override;
     VideoCore::RasterizerDownloadArea GetFlushArea(DAddr addr, u64 size) override;
+    bool HasPendingQueries(DAddr addr, u64 size) override;
     void InvalidateRegion(DAddr addr, u64 size,
                           VideoCommon::CacheType which = VideoCommon::CacheType::All) override;
     void PrepareRegionWrite(DAddr addr, u64 size, VideoCommon::CacheType which) override;
@@ -241,6 +242,8 @@ private:
     void UpdateVertexInput(Tegra::Engines::Maxwell3D::Regs& regs);
 
     void FrameDumpPass(const Framebuffer* framebuffer);
+    /// EDEN_NX2_PENDING_WRITE_TRACE: logs bound buffer ranges with collected, unapplied CPU writes.
+    void TracePendingCpuWrites(bool compute, std::span<const u64> shader_hashes);
 
     Tegra::GPU& gpu;
     Tegra::MaxwellDeviceMemoryManager& device_memory;
