@@ -177,6 +177,49 @@ TEST_CASE("Ampere per-tap gathers take offsets from IMAD.MOV.U32 immediates",
     REQUIRE(LowerToMaxwell(predicated).error == "native per-tap gather nonconstant offsets");
 }
 
+TEST_CASE("Ampere per-tap gathers accept offsets guarded by the gather's own predicate",
+          "[video_core][ampere][gather]") {
+    // From the 0400486024DEC000 upscaler (9387db798781f081, 0x2250..0x2290):
+    // @!P1 IMAD.MOV.U32 R16/R17, RZ, RZ, imm; @!P1 TLD4.PTP ... R16.
+    auto code = PerTapProgram();
+    code[0].words = {0xff089424, 0xff00ff00, 0x078e00ff, 0x000fe400}; // @!P1 R8 = imm
+    code[1].words = {0xff099424, 0x01000001, 0x078e00ff, 0x000fe400}; // @!P1 R9 = imm
+    code[2].words[0] = (code[2].words[0] & ~0xf000U) | 0x9000U;       // @!P1 gather
+    const auto lowered = LowerToMaxwell(code);
+    INFO(lowered.error);
+    REQUIRE(lowered);
+    // A different guard, or an unguarded gather, does not prove the offsets.
+    auto other = code;
+    other[2].words[0] = (other[2].words[0] & ~0xf000U) | 0x1000U; // @P1 gather
+    REQUIRE(LowerToMaxwell(other).error == "native per-tap gather nonconstant offsets");
+    auto unguarded = code;
+    unguarded[2].words[0] = (unguarded[2].words[0] & ~0xf000U) | 0x7000U;
+    REQUIRE(LowerToMaxwell(unguarded).error == "native per-tap gather nonconstant offsets");
+    // Instructions without a predicate destination may sit in between (NOP here)...
+    const std::array<Instruction, 5> nop_between{{
+        code[0],
+        {{0x00007918, 0x00000000, 0x00000000, 0x000fc000}},
+        code[1],
+        code[2],
+        Exit,
+    }};
+    INFO(LowerToMaxwell(nop_between).error);
+    REQUIRE(LowerToMaxwell(nop_between));
+    // ...but one that may rewrite P1 (ISETP P1, PT, R0, imm) breaks the proof.
+    const std::array<Instruction, 5> compare_between{{
+        code[0],
+        {{0x0000780c, 0x00000010, 0x03f26070, 0x000fe400}},
+        code[1],
+        code[2],
+        Exit,
+    }};
+    REQUIRE_FALSE(LowerToMaxwell(compare_between));
+    auto other_compare = compare_between;
+    other_compare[1].words[2] = 0x03f46070; // ISETP P2: P1 survives
+    INFO(LowerToMaxwell(other_compare).error);
+    REQUIRE(LowerToMaxwell(other_compare).error != "native per-tap gather nonconstant offsets");
+}
+
 TEST_CASE("Ampere per-tap gathers reject unproven offsets and unsupported modes",
           "[video_core][ampere][gather]") {
     // The captured instruction alone has no visible offset definitions.

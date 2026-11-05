@@ -24,6 +24,22 @@ TEST_CASE("Ampere LEA.HI with a constant base and no carry lowers", "[video_core
     REQUIRE(std::find(out.begin(), out.end(), 0x5c1000000fb7fa01ULL) != out.end());
 }
 
+TEST_CASE("Ampere LEA.HI with a negated register base lowers", "[video_core][ampere]") {
+    // LEA.HI R1, R1, -R0, RZ, 0x1e from the Ocarina of Time upscaler (9387db798781f081, 0x4b50).
+    const std::array<Instruction, 2> code{{{{0x01017211, 0x80000000, 0x078ff0ff, 0x000fca00}}, Exit}};
+    const auto lowered = LowerToMaxwell(code);
+    INFO(lowered.error);
+    REQUIRE(static_cast<bool>(lowered));
+    const auto& out = lowered.instructions;
+    // R250 = R1 >> 2, then R1 = R250 - R0 (Maxwell IADD bit 48 negates B).
+    REQUIRE(std::find(out.begin(), out.end(), 0x38280000002701faULL) != out.end());
+    REQUIRE(std::find(out.begin(), out.end(), 0x5c11000000070000ULL | 1 | (250ULL << 8)) != out.end());
+    // With .X the negation has no lowering.
+    auto extended = code;
+    extended[0].words[2] |= 1U << 10;
+    REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(extended)));
+}
+
 TEST_CASE("Ampere LEA.HI with a constant base still rejects a carry out", "[video_core][ampere]") {
     // The same LEA.HI writing a carry out to P0 has no lowering yet.
     Instruction carry{{0x11017a11, 0x00c00000, 0x078ff0ff, 0x000fe400}};
