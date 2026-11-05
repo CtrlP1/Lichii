@@ -129,3 +129,26 @@ TEST_CASE("Fast Fusion constant LEA handles negation and high-word carry", "[amp
               (250ULL << 8) | (251ULL << 20)));
     }
 }
+
+TEST_CASE("Ocarina FSEL with a uniform register source lowers to Maxwell FSEL",
+          "[ampere][fsel]") {
+    // FSEL R1, R1, UR4, P1 from three 0400486024DEC000 fragment programs (opcode 0xc08).
+    constexpr Instruction captured{{0x01017c08, 0x00000004, 0x08800000, 0x000fe400}};
+    const auto lowered = LowerToMaxwell(std::array{captured, Exit});
+    INFO(lowered.error);
+    REQUIRE(lowered);
+    REQUIRE(lowered.source_instruction_offsets[1] - lowered.source_instruction_offsets[0] == 1);
+    const u64 fsel = lowered.instructions[lowered.source_instruction_offsets[0]];
+    CHECK((fsel >> 48) == 0x5ca0);
+    CHECK((fsel & 0xff) == 1);              // R1
+    CHECK(((fsel >> 8) & 0xff) == 1);       // Ra = R1
+    CHECK(((fsel >> 20) & 0xff) == 216 + 4); // UR4 in its lowered register
+    CHECK(((fsel >> 39) & 7) == 1);         // P1
+    CHECK(((fsel >> 42) & 1) == 0);         // not negated
+    // The register form selects the same way.
+    constexpr Instruction reg_form{{0x01017208, 0x00000004, 0x00800000, 0x000fe400}};
+    const auto reg_lowered = LowerToMaxwell(std::array{reg_form, Exit});
+    REQUIRE(reg_lowered);
+    const u64 reg_fsel = reg_lowered.instructions[reg_lowered.source_instruction_offsets[0]];
+    CHECK((reg_fsel & ~(u64{255} << 20)) == (fsel & ~(u64{255} << 20)));
+}

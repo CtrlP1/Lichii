@@ -118,7 +118,7 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
         case 0x202: case 0x802: case 0x424: case 0x724: case 0x824: case 0xe24: case 0x227:
         case 0x810: case 0x819: case 0x845: case 0x906: case 0x820:
         case 0x812: case 0x589:
-        case 0x212: case 0x207: case 0x807: case 0x208: case 0x808:
+        case 0x212: case 0x207: case 0x807: case 0x208: case 0x808: case 0xc08:
         case 0x220: case 0xa20: case 0x221: case 0x421: case 0x621:
         case 0x223: case 0x423: case 0x623: case 0x823: case 0xa23:
         case 0x243: case 0x245: case 0x306:
@@ -2472,6 +2472,9 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
             // Rb, Rb+1. The host gather needs them as constants, so they must be proven immediates.
             const bool per_tap = insn.Bits(76, 2) == 2;
             const bool half = insn.Bits(79, 1) != 0;
+            // Bit 78: depth compare (as for TEX). Only the plain 2D form is lowered: x, y in
+            // Ra, Ra+1 and the reference in Rb, which Maxwell TLD4.DC reads from its meta register.
+            const bool depth_compare = insn.Bits(78, 1) != 0 && !per_tap;
             const u32 register_limit = uses_uniform_bank ? high_uniform_base : 246U;
             const bool array = insn.Bits(61, 3) == 5;
             if (bindless && array) {
@@ -2488,7 +2491,9 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                     (insn.words[3] & 0xc00001ffU))
                     return fail(index, "native uniform array texture gather mode");
             }
-            if ((insn.Bits(61, 3) != 1 && !array) || (insn.Bits(77, 2) && !per_tap) || insn.Bits(81, 3) != 7 ||
+            if ((insn.Bits(61, 3) != 1 && !array) || (insn.Bits(77, 1) && !per_tap) ||
+                (depth_compare && (bindless || array || offsets || half || source_a == 255 ||
+                                   source_a + 1 >= register_limit || source_b >= register_limit)) || insn.Bits(81, 3) != 7 ||
                 insn.Bits(59, 1) ||
                 (array && !bindless && (!insn.Bits(60, 1) ||
                            (insn.words[2] & ~0x058000ffU) != 0x001e0f00U ||
@@ -2496,12 +2501,14 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                            dest + 2 > register_limit || second_dest + 2 > register_limit ||
                            (second_dest < dest + 2 && dest < second_dest + 2) ||
                            (insn.words[3] & 0xc00001ffU))) ||
-                (half && (bindless || offsets || per_tap || !insn.Bits(60, 1) || insn.Bits(80, 1) ||
+                (half && (bindless || offsets || !insn.Bits(60, 1) || insn.Bits(80, 1) ||
                           insn.Bits(91, 1) ||
                           (source_b != 255 && source_b >= register_limit) ||
                           mask != 15 || dest >= register_limit || second_dest >= register_limit)) ||
                 (offsets && (bindless || source_b == 255 || (source_a != 255 && source_a >= 245))) ||
-                (per_tap && (bindless || insn.Bits(78, 3) || insn.Bits(91, 1))) ||
+                // Bit 79 is the FP16 result (handled after the gather), so per-tap only rejects
+                // bits 78 (depth compare) and 80.
+                (per_tap && (bindless || insn.Bits(78, 1) || insn.Bits(80, 1) || insn.Bits(91, 1))) ||
                 insn.Bits(89, 1) || mask == 0 ||
                 (bindless ? (handle >= 246 || insn.Bits(46, 13) || !insn.Bits(91, 1))
                           : (insn.Bits(40, 14) > 0x1fff || binding >= 18 ||
@@ -2512,9 +2519,14 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                     source_b + 1 >= register_limit || (dest != 255 && dest + 1 >= register_limit) ||
                     (second_dest != 255 && second_dest + 1 >= register_limit))
                     return fail(index, "native per-tap gather operands");
-                // The backward scan below is only sound for straight-line programs: every
-                // instruction up to the terminal EXIT must be one of these non-branching forms.
+                // The backward scan below needs every path into the gather to run the offset
+                // definitions it finds. Straight-line programs (no control flow before the
+                // terminal EXIT; predicated EXIT and KILL only end threads) always satisfy it.
+                // Otherwise all control flow must be known (bounded_control) and no branch,
+                // call or BSSY target may sit between a definition and the gather.
                 bool terminal = false;
+                bool straight = true;
+                const Instruction* first_control = nullptr;
                 for (const auto& instruction : code) {
                     if (instruction.Bits(12, 4) == 15) continue;
                     const u32 op = instruction.Bits(0, 12);
@@ -2523,14 +2535,22 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                         terminal = true;
                         break;
                     }
-                    if (op != 0x326 && op != 0x802 && op != 0x307 && op != 0x421 &&
-                        op != 0xa20 && op != 0xb63 && op != 0x221 && op != 0x823 &&
-                        op != 0x423 && op != 0x223 && op != 0x308 && op != 0x220 && op != 0x820)
-                        return fail(index, "native per-tap gather control-flow proof");
+                    if (op == 0x94d || op == 0x95b) continue;
+                    if (op >= 0x940 && op <= 0x95f && straight) {
+                        straight = false;
+                        first_control = &instruction;
+                    }
                 }
+                if (!straight && !bounded_control)
+                    // Report the instruction that breaks the proof, not the gather.
+                    return fail(static_cast<u32>(first_control - code.data()),
+                                "native per-tap gather control-flow proof");
                 if (!terminal) return fail(index, "native per-tap gather terminal proof");
                 std::array<std::optional<u32>, 2> packed_offsets;
                 for (u32 cursor = index; cursor > 0 && (!packed_offsets[0] || !packed_offsets[1]);) {
+                    // A jump landing here could skip the definitions still missing.
+                    if (!straight && control_entries[cursor])
+                        return fail(cursor, "native per-tap gather control-flow proof");
                     const auto& definition = code[--cursor];
                     if (definition.Bits(12, 4) == 15) continue;
                     const u32 op = definition.Bits(0, 12), target = definition.Bits(16, 8);
@@ -2547,12 +2567,36 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                         }
                         continue;
                     }
-                    if (op != 0x802 && op != 0x307 && op != 0x421 && op != 0xa20)
-                        return fail(index, "native per-tap gather offset proof");
+                    // IMAD.MOV.U32 Rd, RZ, RZ, imm: the same move the 0x424 case lowers to MOV.
+                    const bool imad_move = op == 0x424 && definition.Bits(24, 8) == 255 &&
+                                           definition.words[2] == 0x078e00ff;
+                    if (op != 0x802 && op != 0x307 && op != 0x421 && op != 0xa20 && !imad_move) {
+                        // Any other instruction only has to leave the offset registers alone:
+                        // write_count knows how many registers it writes from Rd (none for
+                        // stores, compares and NOP); otherwise assume up to four, and, for
+                        // texture instructions, two more from the second destination.
+                        // Control flow (BRA, BSSY, BSYNC, EXIT, ...) writes no general register;
+                        // where it can jump is checked through control_entries above.
+                        if (op >= 0x940 && op <= 0x95f) continue;
+                        const bool texture = (op & 0x0f0) == 0x060 && (op >> 8) != 0;
+                        const u32 second = texture ? definition.Bits(64, 8) : 255U;
+                        const u32 written = write_count(definition).value_or(4U);
+                        for (u32 i = 0; i < 2; ++i) {
+                            if (packed_offsets[i]) continue;
+                            const u32 reg = source_b + i;
+                            if ((target != 255 && reg >= target && reg < target + written) ||
+                                (second != 255 && reg >= second && reg < second + 2))
+                                return fail(static_cast<u32>(cursor), "native per-tap gather offset proof");
+                        }
+                        continue;
+                    }
                     for (u32 i = 0; i < 2; ++i) {
                         if (packed_offsets[i] || target != source_b + i) continue;
-                        if (op != 0x802 || definition.Bits(12, 4) != 7 || definition.Bits(24, 8) ||
-                            definition.words[2] != 0x00000f00)
+                        const bool constant =
+                            definition.Bits(12, 4) == 7 &&
+                            (imad_move || (op == 0x802 && !definition.Bits(24, 8) &&
+                                           definition.words[2] == 0x00000f00));
+                        if (!constant)
                             return fail(index, "native per-tap gather nonconstant offsets");
                         packed_offsets[i] = definition.words[1];
                     }
@@ -2572,13 +2616,13 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
             if (!bindless) result.required_texture_buffer = binding;
             // Two coordinates: x in Ra, y in Rb (the coordinate list splits evenly across them);
             // with an offset, x and y in Ra, Ra+1 and the offset in Rb.
-            const u32 y = !offsets && !per_tap ? source_b : source_a == 255 ? 255U : source_a + 1;
+            const u32 y = !offsets && !per_tap && !depth_compare ? source_b : source_a == 255 ? 255U : source_a + 1;
             emit(0x5c98000000000000ULL | predicate | 250 | (u64{15} << 39) | (u64{source_a} << 20));
             emit(0x5c98000000000000ULL | predicate | 251 | (u64{15} << 39) |
                  (u64{array ? source_a + 1 : y} << 20));
             if (array)
                 emit(0x5c98000000000000ULL | predicate | 252 | (u64{15} << 39) | (u64{source_b} << 20));
-            if (offsets) {
+            if (offsets || depth_compare) {
                 emit(0x5c98000000000000ULL | predicate | 246 | (u64{15} << 39) | (u64{source_b} << 20));
             }
             if (bindless) {
@@ -2588,8 +2632,9 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                      (u64{insn.Bits(90, 1)} << 49) | (u64{7} << 51));
             } else {
             emit(0xc800000000000000ULL | predicate | 250 | (u64{250} << 8) |
-                 (u64{per_tap ? 248U : offsets ? 246U : 255U} << 20) | (u64{array ? 3U : 2U} << 28) | (u64{mask} << 31) |
-                 (u64{insn.Bits(40, 14)} << 36) | (u64{insn.Bits(90, 1)} << 49) | (u64{7} << 51) |
+                 (u64{per_tap ? 248U : (offsets || depth_compare) ? 246U : 255U} << 20) | (u64{array ? 3U : 2U} << 28) |
+                 (u64{mask} << 31) | (u64{insn.Bits(40, 14)} << 36) | (u64{insn.Bits(90, 1)} << 49) |
+                 (u64{depth_compare ? 1U : 0U} << 50) | (u64{7} << 51) |
                  (u64{per_tap ? 2U : offsets ? 1U : 0U} << 54) | (u64{insn.Bits(87, 2)} << 56));
             }
             if (half) {
@@ -3180,7 +3225,7 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
             break;
         }
         case 0x207: case 0x807: case 0xa07: case 0xc07:
-        case 0x208: case 0x808: case 0xa08: { // Bitwise SEL / FSEL
+        case 0x208: case 0x808: case 0xa08: case 0xc08: { // Bitwise SEL / FSEL (0xc08: uniform b)
             // FSEL applies the floating operand modifiers (negate/absolute) before selecting.
             const bool floating = (opcode & 0x1ff) == 0x008;
             const u32 a = operand(0, floating), b = operand(1, floating);
