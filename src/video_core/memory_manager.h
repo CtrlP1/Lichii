@@ -255,7 +255,6 @@ private:
     bool native_tiling{};
     mutable std::mutex guard;
     /// Bumped after each page table change; MaxContinuousRange answers are kept until then.
-    std::atomic<u64> map_serial{};
 
     static constexpr size_t continuous_bits = 64;
 
