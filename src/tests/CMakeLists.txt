@@ -90,6 +90,7 @@ add_executable(tests
     common/bit_field.cpp
     common/cityhash.cpp
     common/container_hash.cpp
+    common/event.cpp
     common/fibers.cpp
     common/game_presets.cpp
     common/host_memory.cpp
@@ -150,6 +151,11 @@ if (TARGET dynarmic::dynarmic)
 endif()
 
 add_test(NAME tests COMMAND tests)
+
+if (WIN32 AND ARCHITECTURE_x86_64)
+    add_executable(event_wait_probe ../../tools/nx2/event_wait_probe.cpp)
+    target_link_libraries(event_wait_probe PRIVATE common)
+endif()
 
 add_executable(update_checker_tests
     common/update_checker.cpp
