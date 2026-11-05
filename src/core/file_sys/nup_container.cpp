@@ -381,7 +381,7 @@ NupContainer::NupContainer(VirtualFile file_, std::size_t memory_cache_cap,
     // re-running zstd on files the 512 MiB default evicted. EDEN_NUP_CACHE_MIB overrides (6144 here).
     if (memory_cache_cap == NupDecompressCache::DefaultCap) {
         std::size_t mib = 6144;
-        if (const char* v = std::getenv("EDEN_NUP_CACHE_MIB"); v != nullptr && *v != ' ') {
+        if (const char* v = std::getenv("EDEN_NUP_CACHE_MIB"); v != nullptr && v[0] != 0) {
             mib = static_cast<std::size_t>(std::strtoull(v, nullptr, 10));
         }
         if (mib >= 64) {
