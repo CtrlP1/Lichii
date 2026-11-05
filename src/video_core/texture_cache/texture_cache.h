@@ -447,8 +447,9 @@ void TextureCache<P>::TickFrame() {
             for (size_t i = 0; i < (std::min<size_t>)(created_formats.size(), 6); ++i) {
                 top += fmt::format(" f{}={}MiB", created_formats[i].second, created_formats[i].first >> 20);
             }
-            LOG_INFO(HW_GPU, "Texture cache last 600 frames: sparse {}, overlapping {}, gpu-modified {};{}",
-                     created_sparse, created_overlapping, created_writes, top);
+            LOG_INFO(HW_GPU, "Texture cache last 600 frames: sparse {}, overlapping {}, gpu-modified {}, blank samples {}, duplicates {};{}",
+                     created_sparse, created_overlapping, created_writes, created_blank, created_duplicate, top);
+            created_blank = created_duplicate = 0;
             created_by_format.clear();
             created_sparse = created_overlapping = created_writes = 0;
         }
@@ -2732,8 +2733,25 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
                 }
             }
             const u64 content = Common::CityHash64(reinterpret_cast<const char*>(sample.data()), sample.size());
-            if (known_contents.insert(content ^ u64{new_image.guest_size_bytes}).second) {
+            const bool blank = std::all_of(sample.begin(), sample.end(),
+                                           [&](u8 value) { return value == sample[0]; });
+            created_blank += blank ? 1 : 0;
+            const bool new_content =
+                known_contents.insert(content ^ u64{new_image.guest_size_bytes}).second;
+            if (new_content) {
                 known_content_bytes += new_image.guest_size_bytes;
+            } else if (!blank) {
+                // A real duplicate: compare whole images against the first one with this sample.
+                ++created_duplicate;
+                static u32 logged_duplicates{};
+                if (logged_duplicates < 400 && (images_created & 15) == 0) {
+                    ++logged_duplicates;
+                    LOG_INFO(HW_GPU, "TC duplicate: gpu {:#x} device {:#x} bytes {} format {} {}x{} levels {} layers {} sample {:016x}",
+                             gpu_addr, u64{cpu_addr}, new_image.guest_size_bytes,
+                             static_cast<u32>(new_info.format), new_info.size.width,
+                             new_info.size.height, new_info.resources.levels,
+                             new_info.resources.layers, content);
+                }
             }
             if (known_images.insert(identity).second) {
                 known_image_bytes += new_image.guest_size_bytes;

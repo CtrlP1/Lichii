@@ -578,6 +578,8 @@ private:
     u64 created_sparse{};
     u64 created_overlapping{};
     u64 created_writes{};
+    u64 created_blank{};
+    u64 created_duplicate{};
     u64 known_content_bytes{};
     u64 known_image_bytes{};
     u64 images_recreated{};
