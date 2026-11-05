@@ -6,6 +6,7 @@
  * SPDX-License-Identifier: 0BSD
  */
 
+#include <cstdlib>
 #include <algorithm>
 #include <limits>
 #include <numeric>
@@ -297,13 +298,19 @@ HostLoc RegAlloc::UseScratchImpl(BlockOfCode& code, IR::Value use_value, std::bi
     const HostLoc current_location = *ValueLocation(use_inst);
     const size_t bit_width = GetBitWidth(use_inst->GetType());
     if (HostLocIsRegister(current_location) && desired_locations.test(size_t(current_location)) && !LocInfo(current_location).IsLocked()) {
-        if (LocInfo(current_location).IsLastUse()) {
-            LocInfo(current_location).is_set_last_use = true;
-        } else {
-            MoveOutOfTheWay(code, current_location);
+        // The value has later uses: copying it to a free register (below) leaves it in place, and
+        // costs a register move instead of a store and reload through the stack on the critical
+        // path of nearly every block. Spill only when no register is free.
+        const bool last_use = LocInfo(current_location).IsLastUse();
+        if (last_use || !copy_to_free_register || !HasEmptyRegister(desired_locations)) {
+            if (last_use) {
+                LocInfo(current_location).is_set_last_use = true;
+            } else {
+                MoveOutOfTheWay(code, current_location);
+            }
+            LocInfo(current_location).WriteLock();
+            return current_location;
         }
-        LocInfo(current_location).WriteLock();
-        return current_location;
     }
 
     const HostLoc destination_location = SelectARegister(desired_locations);
@@ -393,6 +400,20 @@ void RegAlloc::ReleaseStackSpace(BlockOfCode& code, const size_t stack_space) no
     ASSERT(reserved_stack_space == stack_space);
     reserved_stack_space = 0;
     code.add(code.rsp, u32(stack_space));
+}
+
+// EDEN_DYN_SPILL=1: spill as before (for comparisons).
+bool copy_to_free_register = std::getenv("EDEN_DYN_SPILL") == nullptr;
+
+bool RegAlloc::HasEmptyRegister(std::bitset<32> desired_locations) const noexcept {
+    for (HostLoc i = HostLoc(0); i < HostLoc(desired_locations.size()); i = HostLoc(size_t(i) + 1)) {
+        // The same registers SelectARegister leaves alone.
+        if (desired_locations.test(size_t(i)) && i != HostLoc::RBP &&
+            !(i >= HostLoc::R13 && i <= HostLoc::R15) && LocInfo(i).IsEmpty()) {
+            return true;
+        }
+    }
+    return false;
 }
 
 HostLoc RegAlloc::SelectARegister(std::bitset<32> desired_locations) const noexcept {
