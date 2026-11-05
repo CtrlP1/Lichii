@@ -572,6 +572,13 @@ private:
     u64 total_used_memory = 0;
     u64 minimum_memory;
     std::unordered_set<u64> known_images;
+    std::unordered_set<u64> known_device_addresses;
+    std::unordered_set<u64> known_contents;
+    std::map<u32, u64> created_by_format;
+    u64 created_sparse{};
+    u64 created_overlapping{};
+    u64 created_writes{};
+    u64 known_content_bytes{};
     u64 known_image_bytes{};
     u64 images_recreated{};
     u64 recreated_bytes{};

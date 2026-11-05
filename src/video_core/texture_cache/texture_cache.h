@@ -14,6 +14,7 @@
 #include <vector>
 #include <optional>
 #include <bit>
+#include "common/cityhash.h"
 #include "common/container/unordered_map.h"
 #include <boost/container/small_vector.hpp>
 
@@ -433,8 +434,24 @@ void TextureCache<P>::TickFrame() {
                  async_decodes_queued, astc_opaque_images, astc_alpha_images);
         LOG_INFO(HW_GPU, "Texture cache last 600 frames: {} uploads from guest memory, {} MiB (largest {} MiB, {} by layer)",
                  images_uploaded, uploaded_bytes >> 20, largest_upload >> 20, layer_uploads);
-        LOG_INFO(HW_GPU, "Texture cache last 600 frames: {} images recreated, {} MiB; distinct since boot: {} images, {} MiB",
-                 images_recreated, recreated_bytes >> 20, known_images.size(), known_image_bytes >> 20);
+        LOG_INFO(HW_GPU, "Texture cache last 600 frames: {} images recreated, {} MiB; distinct since boot: {} images, {} MiB; {} device addresses; {} contents, {} MiB",
+                 images_recreated, recreated_bytes >> 20, known_images.size(), known_image_bytes >> 20,
+                 known_device_addresses.size(), known_contents.size(), known_content_bytes >> 20);
+        {
+            std::vector<std::pair<u64, u32>> created_formats;
+            for (const auto& [created_format, created_bytes] : created_by_format) {
+                created_formats.emplace_back(created_bytes, created_format);
+            }
+            std::ranges::sort(created_formats, std::greater{});
+            std::string top;
+            for (size_t i = 0; i < (std::min<size_t>)(created_formats.size(), 6); ++i) {
+                top += fmt::format(" f{}={}MiB", created_formats[i].second, created_formats[i].first >> 20);
+            }
+            LOG_INFO(HW_GPU, "Texture cache last 600 frames: sparse {}, overlapping {}, gpu-modified {};{}",
+                     created_sparse, created_overlapping, created_writes, top);
+            created_by_format.clear();
+            created_sparse = created_overlapping = created_writes = 0;
+        }
         images_recreated = recreated_bytes = 0;
         images_uploaded = uploaded_bytes = largest_upload = layer_uploads = 0;
         astc_opaque_images = astc_alpha_images = 0;
@@ -2698,6 +2715,26 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
         static const bool log_unique = std::getenv("EDEN_NX2_TC_LOG") != nullptr;
         if (log_unique) {
             const u64 identity = key ^ (u64{gpu_addr} * 0x9E3779B97F4A7C15ULL);
+            // Guest memory is 12 GiB at most: the same bytes can only come back under other
+            // addresses or shapes. Device address, and a sample of the contents.
+            known_device_addresses.insert(cpu_addr);
+            created_by_format[static_cast<u32>(new_info.format)] += new_image.guest_size_bytes;
+            created_sparse += new_info.is_sparse ? 1 : 0;
+            created_overlapping += !join_overlap_ids.empty() || !join_left_aliased_ids.empty() ||
+                                           !join_right_aliased_ids.empty() ? 1 : 0;
+            created_writes += True(new_image.flags & ImageFlagBits::GpuModified) ? 1 : 0;
+            std::array<u8, 512> sample{};
+            const u64 stride = (std::max<u64>)(new_image.guest_size_bytes / 4, 1);
+            for (u64 part = 0; part < 4; ++part) {
+                const u64 read = (std::min<u64>)(128, new_image.guest_size_bytes);
+                if (part * stride + read <= new_image.guest_size_bytes) {
+                    gpu_memory->ReadBlockUnsafe(gpu_addr + part * stride, sample.data() + part * 128, read);
+                }
+            }
+            const u64 content = Common::CityHash64(reinterpret_cast<const char*>(sample.data()), sample.size());
+            if (known_contents.insert(content ^ u64{new_image.guest_size_bytes}).second) {
+                known_content_bytes += new_image.guest_size_bytes;
+            }
             if (known_images.insert(identity).second) {
                 known_image_bytes += new_image.guest_size_bytes;
             } else {
