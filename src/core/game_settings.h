@@ -44,7 +44,8 @@ enum class GPUVendor {
 };
 
 enum class TitleID : std::uint64_t {
-    NinjaGaidenRagebound = 0x0100781020710000ULL
+    NinjaGaidenRagebound = 0x0100781020710000ULL,
+    OcarinaOfTime = 0x0400486024DEC000ULL,
 };
 
 struct EnvironmentInfo {
@@ -55,6 +56,7 @@ struct EnvironmentInfo {
 
 EnvironmentInfo DetectEnvironment(const VideoCore::RendererBase& renderer);
 
+void LoadEarlyOverrides(std::uint64_t program_id);
 void LoadOverrides(std::uint64_t program_id, const VideoCore::RendererBase& renderer);
 
 } // namespace Core::GameSettings
