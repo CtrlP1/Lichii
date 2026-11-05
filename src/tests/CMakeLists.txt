@@ -8,6 +8,7 @@ add_executable(tests
     video_core/aftermath_dump.cpp
     video_core/frame_dump_schedule.cpp
     video_core/gpu_timestamp.cpp
+    video_core/swizzle_parallel.cpp
     video_core/parallel_record.cpp
     video_core/parallel_record_vulkan.cpp
     core/nx2_streamplay.cpp

@@ -4,10 +4,19 @@
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
+#include <condition_variable>
+#include <cstdlib>
 #include <cstring>
+#include <functional>
+#include <memory>
+#include <mutex>
 #include <span>
+#include <thread>
+#include <vector>
 
 #include "common/alignment.h"
 #include "common/assert.h"
@@ -18,6 +27,132 @@
 
 namespace Tegra::Texture {
 namespace {
+// Helper threads for large (un)swizzles. Each line of a swizzle writes its own bytes, so lines
+// can be split across threads with identical results. Texture uploads run on the GPU thread (the
+// split's back), where unswizzling took ~12% of its time in Ocarina of Time.
+// EDEN_NX2_SWIZZLE_THREADS=<n> sets the helpers (0 disables; default 3).
+class SwizzlePool {
+public:
+    static SwizzlePool& Get() {
+        static SwizzlePool pool;
+        return pool;
+    }
+
+    /// Runs func(chunk) for chunk in [0, chunks), on the caller and the helpers; returns when done.
+    /// Falls back to the caller alone when the pool is busy (another thread's swizzle).
+    void Run(u32 chunks, const std::function<void(u32)>& func) {
+        if (workers.empty() || chunks < 2 || !busy.try_lock()) {
+            for (u32 i = 0; i < chunks; ++i) {
+                func(i);
+            }
+            return;
+        }
+        auto job = std::make_shared<Job>();
+        job->func = &func;
+        job->chunks = chunks;
+        {
+            std::scoped_lock lock{mutex};
+            current = job;
+            ++generation;
+        }
+        cv.notify_all();
+        Work(*job);
+        while (job->done.load(std::memory_order_acquire) != chunks) {
+            const u32 seen = job->done.load(std::memory_order_acquire);
+            if (seen != chunks) {
+                job->done.wait(seen, std::memory_order_acquire);
+            }
+        }
+        {
+            std::scoped_lock lock{mutex};
+            current.reset();
+        }
+        busy.unlock();
+    }
+
+private:
+    struct Job {
+        const std::function<void(u32)>* func{};
+        u32 chunks{};
+        std::atomic<u32> next{0};
+        std::atomic<u32> done{0};
+    };
+
+    SwizzlePool() {
+        u32 count = 3;
+        if (const char* value = std::getenv("EDEN_NX2_SWIZZLE_THREADS")) {
+            count = static_cast<u32>(std::strtoul(value, nullptr, 10));
+        }
+        count = (std::min)(count, 8U);
+        for (u32 i = 0; i < count; ++i) {
+            workers.emplace_back([this](std::stop_token token) { Loop(token); });
+        }
+    }
+
+    ~SwizzlePool() {
+        for (auto& worker : workers) {
+            worker.request_stop();
+        }
+        cv.notify_all();
+    }
+
+    static void Work(Job& job) {
+        for (u32 i = job.next.fetch_add(1, std::memory_order_relaxed); i < job.chunks;
+             i = job.next.fetch_add(1, std::memory_order_relaxed)) {
+            (*job.func)(i);
+            if (job.done.fetch_add(1, std::memory_order_acq_rel) + 1 == job.chunks) {
+                job.done.notify_all();
+            }
+        }
+    }
+
+    void Loop(std::stop_token token) {
+        u64 seen = 0;
+        while (true) {
+            std::shared_ptr<Job> job;
+            {
+                std::unique_lock lock{mutex};
+                cv.wait(lock, token, [&] { return generation != seen; });
+                if (token.stop_requested()) {
+                    return;
+                }
+                seen = generation;
+                job = current;
+            }
+            if (job) {
+                Work(*job);
+            }
+        }
+    }
+
+    std::mutex busy;
+    std::mutex mutex;
+    std::condition_variable_any cv;
+    std::shared_ptr<Job> current;
+    u64 generation{};
+    std::vector<std::jthread> workers;
+};
+
+/// Splits [0, lines) into chunks of whole GOB rows for SwizzlePool::Run; small images stay serial.
+template <typename Func>
+void ForEachLineRange(u32 lines, size_t bytes, u32 rows_per_unit, const Func& func) {
+    constexpr size_t MinParallelBytes = 256 * 1024;
+    constexpr u32 TargetChunks = 16;
+    if (bytes < MinParallelBytes || lines <= rows_per_unit) {
+        func(0, lines);
+        return;
+    }
+    const u32 units = Common::DivCeil(lines, rows_per_unit);
+    const u32 units_per_chunk = (std::max)(1U, Common::DivCeil(units, TargetChunks));
+    const u32 chunk_lines = units_per_chunk * rows_per_unit;
+    const u32 chunks = Common::DivCeil(lines, chunk_lines);
+    const std::function<void(u32)> run = [&](u32 chunk) {
+        const u32 begin = chunk * chunk_lines;
+        func(begin, (std::min)(lines, begin + chunk_lines));
+    };
+    SwizzlePool::Get().Run(chunks, run);
+}
+
 constexpr u32 NativeGobOffset(u32 offset, bool native_tiling) {
     if (!native_tiling) return offset;
     const u32 difference = ((offset >> 5) ^ (offset >> 6)) & 1;
@@ -63,11 +198,18 @@ void SwizzleImpl(std::span<u8> output, std::span<const u8> input, u32 width, u32
     const u32 block_depth_mask = (1U << block_depth) - 1;
     const u32 x_shift = GOB_SIZE_SHIFT + block_height + block_depth;
 
-    for (u32 slice = 0; slice < depth; ++slice) {
+    // Lines of all slices, flattened: (slice, line) = (index / height, index % height). Chunks are
+    // whole GOB rows of one block height (8 << block_height lines) and never share output bytes.
+    const size_t total_bytes = size_t{pitch} * height * depth;
+    ForEachLineRange(height * depth, total_bytes, GOB_SIZE_Y << block_height,
+                     [&](u32 first, u32 last) {
+    for (u32 index = first; index < last; ++index) {
+        const u32 slice = index / height;
+        const u32 line = index % height;
         const u32 z = slice + origin_z;
         const u32 offset_z = (z >> block_depth) * slice_size +
                              ((z & block_depth_mask) << (GOB_SIZE_SHIFT + block_height));
-        for (u32 line = 0; line < height; ++line) {
+        {
             const u32 y = line + origin_y;
             const u32 swizzled_y = pdep<SWIZZLE_Y_BITS>(y);
 
@@ -94,6 +236,7 @@ void SwizzleImpl(std::span<u8> output, std::span<const u8> input, u32 width, u32
             }
         }
     }
+    });
 }
 
 template <bool TO_LINEAR, u32 BYTES_PER_PIXEL>
