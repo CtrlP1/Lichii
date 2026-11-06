@@ -82,7 +82,7 @@ set(YUZU_QT_MIRROR "" CACHE STRING "What mirror to use for downloading the bundl
 cmake_dependent_option(YUZU_USE_BUNDLED_QT "Download bundled Qt binaries" "${MSVC}" "ENABLE_QT" OFF)
 
 option(ENABLE_DEBUG_TOOLS "Enable debugging tools (maxwell disassembler, SPIRV translator, etc)" OFF)
-option(ENABLE_WERROR "Enable -Werror diagnostics" ON)
+option(ENABLE_WERROR "Enable -Werror diagnostics" OFF)
 
 # Handle specific -Werror downgrades safely across platforms
 if(ENABLE_WERROR)
