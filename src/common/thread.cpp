@@ -741,10 +741,6 @@ bool Event::WaitFor(const std::chrono::nanoseconds time) {
     };
     const u64 ticks_per_second = Common::g_wall_clock.NsToTicks(std::chrono::seconds{1});
     if (caps.monitorx) {
-        const auto deadline = EventWaitDeadline(
-            std::chrono::duration_cast<std::chrono::nanoseconds>(
-                std::chrono::steady_clock::now().time_since_epoch()), time);
-        const u64 ticks_per_second = Common::g_wall_clock.NsToTicks(std::chrono::seconds{1});
         while (true) {
             // Armed monitor, as per manual, MWAITX must be conditional if the condition isn't satisfied
             // to prevent a race condition.
