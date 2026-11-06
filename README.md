@@ -14,6 +14,8 @@
 
 Lichii is an experimental, open-source Nintendo Switch and Switch 2 emulator written in C++. It builds on Eglantine, Eden, yuzu and Sudachi, preserving their contributions while developing this fork's game compatibility and renderer fixes.
 
+> **Ocarina of Time on Linux and AMD:** see the [setup guide](HOW-TO.md). You must provide your own keys, firmware and game.
+
 This is an independent fork, not an official release of those upstream projects. Lichii is not affiliated with Nintendo.
 
 ## Downloads and setup
