@@ -19,6 +19,7 @@ def digest(data):
 
 
 def walk_container(data, name, depth=0, dictionaries=None):
+    """Yield shader records and member errors from a supported container."""
     if depth > 12:
         raise ArchiveError("excessive container nesting")
     magic = data[:4]
@@ -51,6 +52,7 @@ def walk_container(data, name, depth=0, dictionaries=None):
 
 
 def extract(sources, output, dictionaries=None):
+    """Extract unique code and control allocations and return their provenance."""
     programs = {}
     archives = []
     errors = []
@@ -104,6 +106,7 @@ def extract(sources, output, dictionaries=None):
 
 
 def main():
+    """Validate local extraction paths and write the shader manifest."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--inventory", type=Path)
     parser.add_argument("--source", action="append", default=[], metavar="TITLE_ID=PATH")

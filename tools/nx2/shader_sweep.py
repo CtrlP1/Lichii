@@ -47,6 +47,7 @@ def digest(data):
 
 
 def parse_cache(data):
+    """Yield shader environments with their original pipeline keys."""
     if len(data) < 12 or data[:8] != b"yuzucach":
         raise CacheError("not a serialized shader-environment cache")
     version, = struct.unpack_from("<I", data, 8)

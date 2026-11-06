@@ -24,6 +24,7 @@ def extent(data, offset, size):
 
 
 def zstd_module():
+    """Find a Python Zstandard module with dictionary support."""
     try:
         from compression import zstd
     except ImportError:
@@ -35,6 +36,7 @@ def zstd_module():
 
 
 def read_zstd_dictionaries(data):
+    """Index the game dictionary pack by Zstandard dictionary ID."""
     zstd = zstd_module()
     if zstd is None:
         raise ArchiveError("dictionary packs require Python 3.14 or backports.zstd")
@@ -53,6 +55,7 @@ def read_zstd_dictionaries(data):
 
 
 def zstd_decompress(data, dictionaries=None):
+    """Decode a bounded frame using its declared dictionary when needed."""
     zstd = zstd_module()
     if zstd is None:
         library = ctypes.CDLL(ctypes.util.find_library("zstd"))

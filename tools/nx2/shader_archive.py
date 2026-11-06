@@ -68,6 +68,7 @@ def parse_sarc(data: bytes) -> list[tuple[str, bytes]]:
 
 
 def parse_bnsh(data: bytes) -> list[dict]:
+    """Read bounded NVN2 allocations and validate stage metadata."""
     _range(data, 0, 0x98)
     if data[:8] != b"BNSH\0\0\0\0" or data[0x60:0x64] != b"grsc":
         raise ArchiveError("invalid BNSH header")

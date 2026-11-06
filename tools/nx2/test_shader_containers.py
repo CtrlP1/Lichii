@@ -60,6 +60,7 @@ def sharcb(slot=0):
 
 class SharcbTests(unittest.TestCase):
     def test_graphics_alias_uses_signed_control_offset(self):
+        """Verify two records can point backwards to the same control block."""
         data, _, _, control = sharcb()
         records = parse_sharcb(data)
         self.assertEqual([item["stage"] for item in records], ["vertex", "vertex"])
@@ -68,12 +69,14 @@ class SharcbTests(unittest.TestCase):
         self.assertEqual(records[0]["code"][:144], graphics(0))
 
     def test_compute_uses_declared_extent_without_graphics_header(self):
+        """Check compute instructions exclude allocation padding."""
         data, _, _, _ = sharcb(3)
         for item in parse_sharcb(data):
             self.assertEqual(item["stage"], "compute")
             self.assertEqual(item["code"], bytes(range(16)))
 
     def test_rejects_cross_pool_or_invalid_control(self):
+        """Reject descriptors that leave their pools or disagree with the stage."""
         data, first, second, control = sharcb()
         for offset, value in [(8, len(data) + 1), (first, 0), (first + 16, 1),
                               (second + 28, 0x80000000), (control + 56, 0),

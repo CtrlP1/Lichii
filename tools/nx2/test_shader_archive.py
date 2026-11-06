@@ -49,6 +49,7 @@ class ShaderArchiveTests(unittest.TestCase):
             self.assertEqual(row["version"], (0, 4, 2, 0))
 
     def test_v142_task_and_mesh_use_extended_slots_and_control_stage(self):
+        """Check both mesh header variants and reject mismatched control stages."""
         for slot, control_stage, header_type, expected in (
                 (0x40, 6, 1, "task"), (0x48, 7, 1, "mesh"), (0x48, 7, 3, "mesh")):
             with self.subTest(stage=expected, header=header_type):
@@ -68,6 +69,7 @@ class ShaderArchiveTests(unittest.TestCase):
                     parse_bnsh(bytes(data))
 
     def test_effect_bundle_extracts_embedded_graphics_and_compute(self):
+        """Check extraction stays scoped to effects bundles and rejects truncation."""
         header = b"YB\x05\x00" + bytes(12)
         data = header + bnsh() + bytes(48) + bnsh(5)
         records = list(walk_container(data, "effects.vsetb.byml"))

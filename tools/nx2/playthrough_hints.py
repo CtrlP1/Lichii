@@ -24,6 +24,7 @@ GRAPHICS_HEADER_SIZE = 80
 
 
 def pack_archive_shader(program, directory, compiler, scratch, header_hashes):
+    """Lower a verified local allocation into packed shader code."""
     stage = program["stage"]
     code_hash = program["code_sha256"]
     source = artifact_path(directory, program["code"])
@@ -51,6 +52,7 @@ def pack_archive_shader(program, directory, compiler, scratch, header_hashes):
 
 
 def export_hints(cache, title, game_version):
+    """Replace shader instructions with fingerprints while preserving pipeline metadata."""
     records = []
     for _, group in groupby(parse_cache(cache), key=lambda env: env["entry"]):
         envs = list(group)
@@ -71,6 +73,7 @@ def export_hints(cache, title, game_version):
 
 
 def restore_pipeline(record, version, programs):
+    """Rebuild one cache record if every shader matches, or return None."""
     stages = record["stages"]
     if not 1 <= len(stages) <= 6:
         raise ValueError("invalid stage count")
@@ -100,10 +103,39 @@ def restore_pipeline(record, version, programs):
 
 
 def import_hints(args, hint):
+    """Rebuild complete pipelines and report why other records were skipped."""
     records = hint["pipelines"]
     version = hint["cache_version"]
-    headers = {(s["stage"], s["header_sha256"]) for r in records for s in r["stages"]}
-    wanted = {(s["stage"], s["shader_sha256"]) for r in records for s in r["stages"]}
+    headers = set()
+    wanted = set()
+    valid = []
+    invalid = 0
+    unsupported = 0
+    for record in records:
+        try:
+            stages = record["stages"]
+            if not isinstance(stages, list) or not 1 <= len(stages) <= 6:
+                raise ValueError("invalid stage count")
+            names = [stage["stage"] for stage in stages]
+            if any(name not in STAGES for name in names):
+                raise ValueError("invalid shader stage")
+            fingerprints = [stage[field] for stage in stages
+                            for field in ("header_sha256", "shader_sha256")]
+            if any(not re.fullmatch(r"[0-9a-f]{64}", value) for value in fingerprints):
+                raise ValueError("invalid shader fingerprint")
+            bytes.fromhex(record["key"])
+            for stage in stages:
+                bytes.fromhex(stage["prefix"])
+                bytes.fromhex(stage["context"])
+        except (TypeError, KeyError, ValueError):
+            invalid += 1
+            continue
+        if any(name not in SUPPORTED_STAGES for name in names):
+            unsupported += 1
+            continue
+        valid.append(record)
+        headers.update((s["stage"], s["header_sha256"]) for s in stages)
+        wanted.update((s["stage"], s["shader_sha256"]) for s in stages)
     candidates = {}
     for path in args.manifest:
         for program in json.loads(path.read_bytes())["programs"]:
@@ -128,12 +160,12 @@ def import_hints(args, hint):
 
     restored = {}
     missing = 0
-    unsupported = 0
-    for record in records:
-        if any(s["stage"] not in SUPPORTED_STAGES for s in record["stages"]):
-            unsupported += 1
+    for record in valid:
+        try:
+            result = restore_pipeline(record, version, programs)
+        except ValueError:  # Includes CacheError from the serialized cache parser.
+            invalid += 1
             continue
-        result = restore_pipeline(record, version, programs)
         if result is None:
             missing += 1
         else:
@@ -146,10 +178,12 @@ def import_hints(args, hint):
         (directory / f"vulkan.fork-v{version}.bin").write_bytes(
             MAGIC + struct.pack("<I", version) + b"".join(restored.values()))
     return {"pipelines_in_hints": len(records), "restored": len(restored),
-            "missing_local_shader_match": missing, "unsupported_stage": unsupported}
+            "missing_local_shader_match": missing, "unsupported_stage": unsupported,
+            "invalid_record": invalid}
 
 
 def main():
+    """Run the hint export or import command."""
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     for name in ("export", "import"):
@@ -184,7 +218,8 @@ def main():
     if args.hints.stat().st_size > 128 * 1024 * 1024:
         parser.error("hint file exceeds 128 MiB")
     hint = json.loads(args.hints.read_bytes())
-    if (hint.get("schema") != SCHEMA or hint.get("cache_version") not in (52, 53) or
+    if (not isinstance(hint, dict) or not isinstance(hint.get("pipelines"), list) or
+            hint.get("schema") != SCHEMA or hint.get("cache_version") not in (52, 53) or
             hint.get("title_id") != args.title or hint.get("game_version") != args.game_version):
         parser.error("hint format, title, or game version does not match")
     summary = import_hints(args, hint)
