@@ -1496,12 +1496,12 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
         }
     }
     if (Tegra::Nx2CmdPageDiag::g_enabled) {
-        bool gpu_written = false;
+        bool diag_gpu_written = false;
         for (GPUVAddr page = source & ~GPUVAddr{0xfff}; page < source + read_bytes; page += 0x1000) {
             const auto device = memory_manager.GpuToCpuAddress(page);
-            gpu_written |= device && Tegra::Nx2IsGpuWritten(*device);
+            diag_gpu_written |= device && Tegra::Nx2IsGpuWritten(*device);
         }
-        Tegra::Nx2CmdPageDiag::RecordDmaRead(source, words, changed, gpu_written);
+        Tegra::Nx2CmdPageDiag::RecordDmaRead(source, words, changed, diag_gpu_written);
     }
 }
 
