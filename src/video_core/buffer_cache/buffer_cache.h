@@ -742,7 +742,9 @@ bool BufferCache<P>::BindGraphicsStorageBuffer(size_t stage, size_t ssbo_index, 
         StorageBufferBinding(ssbo_addr, cbuf_index, is_written,
                              maxwell3d->GetNativeMacroEngine().native_turing ||
                                  indirect_offset != ~0U,
-                             indirect_offset != ~0U);
+                             indirect_offset != ~0U,
+                             maxwell3d->GetNativeMacroEngine().native_turing ||
+                                 indirect_offset != ~0U);
     if (indirect_offset != ~0U) {
         TraceTablePointer(false, stage, ssbo_index, cbuf_index, cbuf_offset, indirect_offset, holder,
                           channel_state->storage_buffers[stage][ssbo_index]);
@@ -833,8 +835,20 @@ void BufferCache<P>::BindComputeStorageBuffer(size_t ssbo_index, u32 cbuf_index,
         }
         ssbo_addr = holder + indirect_offset;
     }
-    channel_state->compute_storage_buffers[ssbo_index] = StorageBufferBinding(
-        ssbo_addr, cbuf_index, is_written, kepler_compute->IsNativeMode(), indirect_offset != ~0U);
+    // Only DLSS parameters and native pointer tables follow bare pointers; other native dispatches
+    // keep their descriptor size, so a write doesn't mark the whole mapping GPU-modified.
+    // EDEN_NX2_COMPUTE_MAPPING_SIZED=1 restores mapping sizing for every native dispatch.
+    static const bool all_mapping_sized = [] {
+        const char* value = std::getenv("EDEN_NX2_COMPUTE_MAPPING_SIZED");
+        return value != nullptr && value[0] == '1';
+    }();
+    const bool native_compute = kepler_compute->IsNativeMode();
+    const bool mapping_sized = (native_compute && all_mapping_sized) ||
+                               kepler_compute->IsDlssDispatch() ||
+                               (native_compute && indirect_offset != ~0U);
+    channel_state->compute_storage_buffers[ssbo_index] =
+        StorageBufferBinding(ssbo_addr, cbuf_index, is_written, native_compute,
+                             indirect_offset != ~0U, mapping_sized);
     if (indirect_offset != ~0U) {
         TraceTablePointer(true, 0, ssbo_index, cbuf_index, cbuf_offset, indirect_offset, holder,
                           channel_state->compute_storage_buffers[ssbo_index]);
@@ -2892,14 +2906,15 @@ void BufferCache<P>::TraceTablePointer(bool compute, size_t stage, size_t ssbo_i
 
 template <class P>
 Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index, bool is_written,
-                                             bool native_pointer, bool table_pointer) const {
+                                             bool native_pointer, bool table_pointer,
+                                             bool mapping_sized) const {
     const GPUVAddr gpu_addr = gpu_memory->Read<u64>(ssbo_addr);
 
     if (gpu_addr == 0) {
         return NULL_BINDING;
     }
 
-    const bool reads_size_word = !(table_pointer && !is_written) && !native_pointer;
+    const bool reads_size_word = !(table_pointer && !is_written) && !mapping_sized;
     const u64 next_qword = reads_size_word ? gpu_memory->Read<u64>(ssbo_addr + 8) : 0;
     const u32 alignment = runtime.GetStorageBufferAlignment();
     struct CachedBinding {
@@ -2914,7 +2929,8 @@ Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
     constexpr size_t ways = 4;
     thread_local std::array<std::array<CachedBinding, ways>, 512> binding_cache{};
     const u32 flags =
-        (is_written ? 1U : 0U) | (native_pointer ? 2U : 0U) | (table_pointer ? 4U : 0U);
+        (is_written ? 1U : 0U) | (native_pointer ? 2U : 0U) | (table_pointer ? 4U : 0U) |
+        (mapping_sized ? 8U : 0U);
     const size_t owner = gpu_memory->GetID() + 1;
     const u64 serial = gpu_memory->MapSerial();
     auto& set = binding_cache[((gpu_addr ^ next_qword ^ flags) * 0x9E3779B97F4A7C15ULL) >> 55];
@@ -2942,7 +2958,7 @@ Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
             // A native (Switch 2) compute program's pointer is bare: the word after it is another
             // parameter (a dimension, stride or texture handle), not an NVN buffer size. Taking it
             // as one bound Fortune's Weave's DLSS input features to 266 bytes and dropped the rest.
-            if (native_pointer) {
+            if (mapping_sized) {
                 return (std::min)(memory_layout_size, static_cast<u32>(8_MiB));
             }
             const u32 packed_size = static_cast<u32>(next_qword);
