@@ -94,6 +94,27 @@ TEST_CASE("Ampere per-tap gathers prove constants across unrelated arithmetic an
     REQUIRE(LowerToMaxwell(branch).error == "native per-tap gather control-flow proof");
 }
 
+TEST_CASE("Ampere per-tap gathers take offsets from IMAD.MOV.U32 immediates",
+          "[video_core][ampere][gather]") {
+    // From the 0400486024DEC000 log: IMAD.MOV.U32 R1, RZ, RZ, 0x01010100 defines an offset word.
+    auto code = PerTapProgram();
+    code[1].words = {0xff097424, 0x01010100, 0x078e00ff, 0x000fe200}; // R9 = 0x01010100
+    const auto lowered = LowerToMaxwell(code);
+    INFO(lowered.error);
+    REQUIRE(lowered);
+    const u64 pred = 7ULL << 16;
+    const auto begin = lowered.instructions.begin() + lowered.source_instruction_offsets[2];
+    REQUIRE(*begin == MoveImmediate(pred, 248, 0xff00ff00));
+    REQUIRE(*(begin + 1) == MoveImmediate(pred, 249, 0x01010100));
+    // A real multiply-add (Ra not RZ) or a predicated move is not a constant.
+    auto product = code;
+    product[1].words[0] = 0x05097424; // IMAD R9, R5, imm, RZ: an unknown write to R9
+    REQUIRE_FALSE(LowerToMaxwell(product));
+    auto predicated = code;
+    predicated[1].words[0] = 0xff091424;
+    REQUIRE(LowerToMaxwell(predicated).error == "native per-tap gather nonconstant offsets");
+}
+
 TEST_CASE("Ampere per-tap gathers reject unproven offsets and unsupported modes",
           "[video_core][ampere][gather]") {
     // The captured instruction alone has no visible offset definitions.
@@ -136,10 +157,43 @@ TEST_CASE("Ampere per-tap gathers reject unproven offsets and unsupported modes"
     invalid = PerTapProgram();
     invalid[2].words[0] = 0x040a7f63;
     REQUIRE_FALSE(LowerToMaxwell(invalid));
-    const Instruction branch{{0x00007947, 0, 0x03800000, 0}};
     const auto program = PerTapProgram();
-    REQUIRE_FALSE(LowerToMaxwell(std::array{branch, program[0], program[1], program[2], Exit}));
-    REQUIRE_FALSE(LowerToMaxwell(std::array{program[0], program[1], program[2], branch, Exit}));
+    // A branch landing on the R9 definition skips the R8 one.
+    const Instruction skip{{0x00007947, 16, 0x03800000, 0}};
+    REQUIRE(LowerToMaxwell(std::array{skip, program[0], program[1], program[2], Exit}).error ==
+            "native per-tap gather control-flow proof");
+    // A back edge onto the gather itself skips both.
+    const Instruction back{{0x00007947, 0xffffffe0U, 0x0383ffff, 0}};
+    REQUIRE(LowerToMaxwell(std::array{program[0], program[1], program[2], back, Exit}).error ==
+            "native per-tap gather control-flow proof");
+}
+
+TEST_CASE("Ampere depth-compare gathers lower to Maxwell TLD4.DC",
+          "[video_core][ampere][gather]") {
+    // TLD4.DC R12/R14, R24 (x, y), R28 (reference), 2D, RGBA from the 0400486024DEC000 log.
+    constexpr Instruction captured{{0x180c7b63, 0x30800e1c, 0x001e4f0e, 0x000f4200}};
+    const auto lowered = LowerToMaxwell(std::array{captured, Exit});
+    INFO(lowered.error);
+    REQUIRE(lowered);
+    const u64 pred = 7ULL << 16;
+    const std::array<u64, 3> prefix{Copy(pred, 250, 24), Copy(pred, 251, 25), Copy(pred, 246, 28)};
+    REQUIRE(std::equal(prefix.begin(), prefix.end(), lowered.instructions.begin()));
+    const u64 tld4 = lowered.instructions[prefix.size()];
+    REQUIRE((tld4 >> 56) == 0xc8);
+    REQUIRE(((tld4 >> 20) & 255) == 246);  // reference in the meta register
+    REQUIRE(((tld4 >> 50) & 1) == 1);      // DC
+    REQUIRE(((tld4 >> 54) & 3) == 0);      // no offsets
+    REQUIRE(((tld4 >> 31) & 15) == 15);
+    const std::array<u64, 4> copies{Copy(pred, 12, 250), Copy(pred, 13, 251), Copy(pred, 14, 252),
+                                    Copy(pred, 15, 253)};
+    REQUIRE(std::equal(copies.begin(), copies.end(), lowered.instructions.begin() + prefix.size() + 1));
+    // Depth compare is only lowered for the plain 2D form.
+    for (const u32 bit : {76U, 79U}) {
+        auto invalid = captured;
+        invalid.words[bit / 32] ^= 1U << (bit % 32);
+        INFO("bit " << bit);
+        REQUIRE_FALSE(LowerToMaxwell(std::array{invalid, Exit}));
+    }
 }
 
 TEST_CASE("Ampere gathers without per-tap offsets keep their previous lowering",

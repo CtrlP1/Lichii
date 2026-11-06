@@ -1,11 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <filesystem>
 #include <fstream>
 #include <string_view>
 #include <system_error>
+#include <span>
+#include <tuple>
+#include <vector>
 
 #include <fmt/format.h>
 
@@ -13,8 +17,8 @@
 
 namespace VideoCommon {
 
-inline constexpr u32 OpenGLPipelineCacheVersion = 46;
-inline constexpr u32 VulkanPipelineCacheVersion = 50;
+inline constexpr u32 OpenGLPipelineCacheVersion = 48;
+inline constexpr u32 VulkanPipelineCacheVersion = 52;
 
 // Official Eglantine (cache version 18 at c0cb3325) and this fork (a different version) both
 // used <shader dir>/<title>/vulkan.bin and vulkan_pipelines.bin. Each build deletes a file
@@ -57,5 +61,48 @@ inline bool AdoptLegacyPipelineCache(const std::filesystem::path& legacy,
     std::filesystem::rename(legacy, versioned, error);
     return !error;
 }
+
+/// Keeps only bounded record metadata; smaller usage ages are more recent.
+class PipelinePreloadSelection {
+public:
+    struct Record {
+        u8 age;
+        u64 hash;
+        std::streampos position;
+    };
+
+    explicit PipelinePreloadSelection(size_t limit_) : limit{limit_} {}
+
+    void Add(u8 age, u64 hash, std::streampos position) {
+        if (limit == 0) {
+            return;
+        }
+        const Record record{age, hash, position};
+        if (records.size() == limit) {
+            if (!MoreRecent(record, records.front())) {
+                return;
+            }
+            std::pop_heap(records.begin(), records.end(), MoreRecent);
+            records.back() = record;
+        } else {
+            records.push_back(record);
+        }
+        std::push_heap(records.begin(), records.end(), MoreRecent);
+    }
+
+    /// Consumes the heap ordering after selection, returning newest records first.
+    std::span<const Record> OrderedRecords() {
+        std::sort_heap(records.begin(), records.end(), MoreRecent);
+        return records;
+    }
+
+private:
+    static bool MoreRecent(const Record& left, const Record& right) {
+        return std::tie(left.age, left.hash) < std::tie(right.age, right.hash);
+    }
+
+    size_t limit;
+    std::vector<Record> records;
+};
 
 } // namespace VideoCommon

@@ -8,6 +8,9 @@ add_executable(tests
     video_core/aftermath_dump.cpp
     video_core/frame_dump_schedule.cpp
     video_core/gpu_timestamp.cpp
+    video_core/swizzle_parallel.cpp
+    video_core/parallel_record.cpp
+    video_core/parallel_record_vulkan.cpp
     core/nx2_streamplay.cpp
     core/nx2_video_ready.cpp
     core/nx2_debug_server.cpp
@@ -23,6 +26,7 @@ add_executable(tests
     video_core/texture_rect_descriptor.cpp
     audio_core/batch_decoder.cpp
     audio_core/hardware_audio_codec.cpp
+    core/gpu_dirty_memory.cpp
     core/memory_acquire.cpp
     core/builtin_patches.cpp
     core/system_test_context.h
@@ -38,6 +42,7 @@ add_executable(tests
     input_common/calibration_lifetime.cpp
     video_core/ampere_logged_numeric.cpp
     video_core/ampere_logged_textures.cpp
+    video_core/oot_visual_workaround.cpp
     video_core/native_texture_header_index.cpp
     video_core/texture_handles.cpp
     video_core/ampere_selevet_modes.cpp
@@ -76,6 +81,7 @@ add_executable(tests
     video_core/pipeline_cache_files.cpp
     video_core/storage_binding_capacity.cpp
     video_core/native_indirect_reset.cpp
+    video_core/fast_draw.cpp
     video_core/gpu_command_safety.cpp
     video_core/syncpoint_actions.cpp
     video_core/nx2_video_render.cpp
@@ -122,6 +128,7 @@ add_executable(tests
     video_core/ampere_bindless_surfaces.cpp
     video_core/native_macro_fifo.cpp
     video_core/uniform_stream_reuse.cpp
+    video_core/usage_tracker.cpp
     video_core/shader_invalidation.cpp
     video_core/descriptor_table.cpp
     video_core/global_address_tracking.cpp

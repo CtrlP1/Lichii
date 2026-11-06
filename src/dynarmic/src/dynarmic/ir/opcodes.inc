@@ -662,6 +662,8 @@ OPCODE(FPVectorToUnsignedFixed64,                           U128,           U128
 
 // A64 Context getters/setters
 A64OPC(SetCheckBit,                                         Void,           U1                                                              )
+A64OPC(SideExitIf,                                          Void,           Cond,           U64,            U64                             )
+A64OPC(SideExitIfBit,                                       Void,           U1,             U1,             U64,            U64             )
 A64OPC(GetCFlag,                                            U1,                                                                             )
 A64OPC(GetNZCVRaw,                                          U32,                                                                            )
 A64OPC(SetNZCVRaw,                                          Void,           U32                                                             )

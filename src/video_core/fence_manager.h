@@ -25,6 +25,7 @@
 #include "video_core/gpu.h"
 #include "video_core/host1x/host1x.h"
 #include "video_core/host1x/syncpoint_manager.h"
+#include "video_core/nx2_fast_draw.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/rasterizer_interface.h"
 
@@ -152,6 +153,11 @@ public:
                 wait_cv.notify_all();
             });
             SignalFence(std::move(func));
+            // The fence's queue submission may be deferred (Vulkan Scheduler::DeferFlush on the
+            // GPU split's back). Only the back submits deferred work, from its idle hook, and the
+            // fencing thread waits for that submission before running func: waiting here without
+            // submitting first deadlocked the back, the fencing thread and the front's Drain.
+            SubmitDeferred();
             std::unique_lock lk(wait_mutex);
             wait_cv.wait(
                 lk, [&wait_finished] { return wait_finished.load(std::memory_order_relaxed); });
@@ -187,6 +193,8 @@ protected:
     virtual bool IsFenceSignaled(TFence& fence) const = 0;
     /// Waits until a fence has been signalled by the host GPU.
     virtual void WaitFence(TFence& fence) = 0;
+    /// Submits fence work the backend deferred, before the calling thread blocks on a fence.
+    virtual void SubmitDeferred() {}
 
     VideoCore::RasterizerInterface& rasterizer;
     Tegra::GPU& gpu;
@@ -269,6 +277,9 @@ private:
                     take_front();
                 }
             }
+            if (!batch.empty()) {
+                VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Fence);
+            }
             size_t texture_pops = 0;
             size_t buffer_pops = 0;
             for (const Released& released : batch) {
@@ -293,6 +304,9 @@ private:
                 for (auto& operation : released.operations) {
                     operation();
                 }
+            }
+            if (!batch.empty()) {
+                VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Fence);
             }
             {
                 std::unique_lock lock(ring_guard);

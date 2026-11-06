@@ -14,6 +14,7 @@
 #include <vector>
 #include <optional>
 #include <bit>
+#include "common/cityhash.h"
 #include "common/container/unordered_map.h"
 #include <boost/container/small_vector.hpp>
 
@@ -23,6 +24,7 @@
 #include "common/slot_vector.h"
 #include "video_core/control/channel_state.h"
 #include "video_core/dirty_flags.h"
+#include "video_core/nx2_fast_draw.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/guest_memory.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
@@ -272,6 +274,12 @@ void TextureCache<P>::ApplyThresholdOverrides(bool log) {
             *target = std::strtoull(value, nullptr, 10) << 20;
         }
     }
+    // EDEN_NX2_TC_MINIMUM_MIB: below this the collector does not run at all. The default (half the
+    // device memory past a margin, ~3.3 GiB on a 24 GB card) has it delete every image unused for
+    // a few seconds, so revisited textures are created, uploaded and unswizzled again (hitches).
+    if (const char* value = std::getenv("EDEN_NX2_TC_MINIMUM_MIB")) {
+        minimum_memory = (std::min)(static_cast<u64>(std::strtoull(value, nullptr, 10)) << 20, expected_memory);
+    }
     if (log) {
         LOG_INFO(HW_GPU, "Texture cache thresholds: expected {} MiB, critical {} MiB, minimum {} MiB",
                  expected_memory >> 20, critical_memory >> 20, minimum_memory >> 20);
@@ -432,6 +440,26 @@ void TextureCache<P>::TickFrame() {
                  async_decodes_queued, astc_opaque_images, astc_alpha_images);
         LOG_INFO(HW_GPU, "Texture cache last 600 frames: {} uploads from guest memory, {} MiB (largest {} MiB, {} by layer)",
                  images_uploaded, uploaded_bytes >> 20, largest_upload >> 20, layer_uploads);
+        LOG_INFO(HW_GPU, "Texture cache last 600 frames: {} images recreated, {} MiB; distinct since boot: {} images, {} MiB; {} device addresses; {} contents, {} MiB",
+                 images_recreated, recreated_bytes >> 20, known_images.size(), known_image_bytes >> 20,
+                 known_device_addresses.size(), known_contents.size(), known_content_bytes >> 20);
+        {
+            std::vector<std::pair<u64, u32>> created_formats;
+            for (const auto& [created_format, created_bytes] : created_by_format) {
+                created_formats.emplace_back(created_bytes, created_format);
+            }
+            std::ranges::sort(created_formats, std::greater{});
+            std::string top;
+            for (size_t i = 0; i < (std::min<size_t>)(created_formats.size(), 6); ++i) {
+                top += fmt::format(" f{}={}MiB", created_formats[i].second, created_formats[i].first >> 20);
+            }
+            LOG_INFO(HW_GPU, "Texture cache last 600 frames: sparse {}, overlapping {}, gpu-modified {}, blank samples {}, duplicates {};{}",
+                     created_sparse, created_overlapping, created_writes, created_blank, created_duplicate, top);
+            created_blank = created_duplicate = 0;
+            created_by_format.clear();
+            created_sparse = created_overlapping = created_writes = 0;
+        }
+        images_recreated = recreated_bytes = 0;
         images_uploaded = uploaded_bytes = largest_upload = layer_uploads = 0;
         astc_opaque_images = astc_alpha_images = 0;
         std::vector<std::pair<u32, u64>> shapes;
@@ -787,6 +815,13 @@ bool TextureCache<P>::RescaleRenderTargets() {
 template <class P>
 void TextureCache<P>::UpdateRenderTargets(bool is_clear) {
     using namespace VideoCommon::Dirty;
+    struct ClearingScope {
+        bool& flag;
+        ~ClearingScope() {
+            flag = false;
+        }
+    } clearing_scope{clearing_render_targets};
+    clearing_render_targets = is_clear;
     auto& flags = maxwell3d->dirty.flags;
     if (!flags[Dirty::RenderTargets]) {
         for (size_t index = 0; index < NUM_RT; ++index) {
@@ -915,6 +950,7 @@ FramebufferId TextureCache<P>::GetFramebufferId(const RenderTargets& key) {
 template <class P>
 void TextureCache<P>::WriteMemory(DAddr cpu_addr, size_t size) {
     ForEachImageInRegion(cpu_addr, size, [this, cpu_addr, size](ImageId image_id, Image& image) {
+        VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Invalidation);
         if (True(image.flags & ImageFlagBits::UnwrittenSparse)) {
             // Written at last: a backed image replaces it where it is used next.
             image.flags |= ImageFlagBits::CpuModified | ImageFlagBits::Remapped;
@@ -936,6 +972,20 @@ void TextureCache<P>::WriteMemory(DAddr cpu_addr, size_t size) {
             UntrackImage(image, image_id);
         }
     });
+}
+
+template <class P>
+u64 TextureCache<P>::CleanSerial(DAddr cpu_addr, size_t size) {
+    bool touched = false;
+    ForEachCPUPage(cpu_addr, size, [&](u64 page) {
+        const auto it = page_table.find(page);
+        touched = it != page_table.end() &&
+                  std::ranges::any_of(it->second, [&](ImageMapId map_id) {
+                      return slot_map_views[map_id].Overlaps(cpu_addr, size);
+                  });
+        return touched;
+    });
+    return touched ? 0 : page_serial.load(std::memory_order_relaxed);
 }
 
 template <class P>
@@ -2675,6 +2725,54 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
             shape.second = gpu_addr;
         }
         ++images_created;
+        // EDEN_NX2_TC_LOG: how much of what is created was seen before at this address and shape.
+        static const bool log_unique = std::getenv("EDEN_NX2_TC_LOG") != nullptr;
+        if (log_unique) {
+            const u64 identity = key ^ (u64{gpu_addr} * 0x9E3779B97F4A7C15ULL);
+            // Guest memory is 12 GiB at most: the same bytes can only come back under other
+            // addresses or shapes. Device address, and a sample of the contents.
+            known_device_addresses.insert(cpu_addr);
+            created_by_format[static_cast<u32>(new_info.format)] += new_image.guest_size_bytes;
+            created_sparse += new_info.is_sparse ? 1 : 0;
+            created_overlapping += !join_overlap_ids.empty() || !join_left_aliased_ids.empty() ||
+                                           !join_right_aliased_ids.empty() ? 1 : 0;
+            created_writes += True(new_image.flags & ImageFlagBits::GpuModified) ? 1 : 0;
+            std::array<u8, 512> sample{};
+            const u64 stride = (std::max<u64>)(new_image.guest_size_bytes / 4, 1);
+            for (u64 part = 0; part < 4; ++part) {
+                const u64 read = (std::min<u64>)(128, new_image.guest_size_bytes);
+                if (part * stride + read <= new_image.guest_size_bytes) {
+                    gpu_memory->ReadBlockUnsafe(gpu_addr + part * stride, sample.data() + part * 128, read);
+                }
+            }
+            const u64 content = Common::CityHash64(reinterpret_cast<const char*>(sample.data()), sample.size());
+            const bool blank = std::all_of(sample.begin(), sample.end(),
+                                           [&](u8 value) { return value == sample[0]; });
+            created_blank += blank ? 1 : 0;
+            const bool new_content =
+                known_contents.insert(content ^ u64{new_image.guest_size_bytes}).second;
+            if (new_content) {
+                known_content_bytes += new_image.guest_size_bytes;
+            } else if (!blank) {
+                // A real duplicate: compare whole images against the first one with this sample.
+                ++created_duplicate;
+                static u32 logged_duplicates{};
+                if (logged_duplicates < 400 && (images_created & 15) == 0) {
+                    ++logged_duplicates;
+                    LOG_INFO(HW_GPU, "TC duplicate: gpu {:#x} device {:#x} bytes {} format {} {}x{} levels {} layers {} sample {:016x}",
+                             gpu_addr, u64{cpu_addr}, new_image.guest_size_bytes,
+                             static_cast<u32>(new_info.format), new_info.size.width,
+                             new_info.size.height, new_info.resources.levels,
+                             new_info.resources.layers, content);
+                }
+            }
+            if (known_images.insert(identity).second) {
+                known_image_bytes += new_image.guest_size_bytes;
+            } else {
+                ++images_recreated;
+                recreated_bytes += new_image.guest_size_bytes;
+            }
+        }
     }
 
     if (!gpu_memory->IsContinuousRange(new_image.gpu_addr, new_image.guest_size_bytes) &&
@@ -2694,8 +2792,67 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
         DeleteImage(overlap_id);
     }
 
-    // TODO: Only upload what we need
-    RefreshContents(new_image, new_image_id);
+    // A new render target that the clear binding it overwrites whole (every channel, the whole
+    // image) needs no upload from guest memory first: Ocarina of Time creates ~4 such targets a
+    // frame outdoors, and uploading them was ~15% of the GPU back thread.
+    const auto overwritten_by_clear = [&] {
+        if (!clearing_render_targets || !join_copies_to_do.empty() ||
+            new_info.type != ImageType::e2D || new_info.resources.levels != 1 ||
+            new_info.resources.layers != 1 || new_info.num_samples != 1) {
+            return false;
+        }
+        const auto& regs = maxwell3d->regs;
+        const auto& surface = regs.clear_surface;
+        if (surface.layer != 0) {
+            return false;
+        }
+        const u32 width = new_info.size.width;
+        const u32 height = new_info.size.height;
+        if (regs.clear_control.use_scissor != 0) {
+            const auto& scissor = regs.scissor_test[0];
+            if (scissor.min_x != 0 || scissor.min_y != 0 || scissor.max_x < width ||
+                scissor.max_y < height) {
+                return false;
+            }
+        }
+        // The clear covers the framebuffer's render area, the smallest bound target.
+        for (u32 index = 0; index < regs.rt_control.count && index < NUM_RT; ++index) {
+            const auto& rt = regs.rt[index];
+            if (rt.Address() != 0 && rt.format != Tegra::RenderTargetFormat::NONE &&
+                (rt.width < width || rt.height < height)) {
+                return false;
+            }
+        }
+        if (regs.zeta_enable && regs.zeta.Address() != 0 &&
+            (regs.zeta_size.width < width || regs.zeta_size.height < height)) {
+            return false;
+        }
+        const bool is_depth_target = regs.zeta_enable && regs.zeta.Address() == gpu_addr;
+        const bool full_stencil = surface.S && regs.stencil_front_mask == 0xFF;
+        switch (VideoCore::Surface::GetFormatType(new_info.format)) {
+        case VideoCore::Surface::SurfaceType::ColorTexture: {
+            const u32 index = surface.RT;
+            return surface.R && surface.G && surface.B && surface.A && index < NUM_RT &&
+                   index < regs.rt_control.count && regs.rt[index].Address() == gpu_addr;
+        }
+        case VideoCore::Surface::SurfaceType::Depth:
+            return is_depth_target && surface.Z;
+        case VideoCore::Surface::SurfaceType::Stencil:
+            return is_depth_target && full_stencil;
+        case VideoCore::Surface::SurfaceType::DepthStencil:
+            return is_depth_target && surface.Z && full_stencil;
+        default:
+            return false;
+        }
+    };
+    if (overwritten_by_clear()) {
+        // Stays CpuModified: UpdateRenderTargets' PrepareImage drops the upload only when
+        // IsFullClear agrees the clear covers the whole image, and uploads it otherwise.
+        runtime.TransitionImageLayout(new_image);
+    } else {
+        // TODO: Only upload what we need
+        RefreshContents(new_image, new_image_id);
+    }
 
     if (can_rescale) {
         ScaleUp(new_image);
@@ -3224,6 +3381,7 @@ void TextureCache<P>::RegisterImage(ImageId image_id) {
     ASSERT_MSG(False(image.flags & ImageFlagBits::Registered),
                "Trying to register an already registered image");
     image.flags |= ImageFlagBits::Registered;
+    page_serial.fetch_add(1, std::memory_order_release);
     total_used_memory += ImageMemoryBytes(slot_images[image_id]);
     image.lru_index = lru_cache.Insert(image_id, frame_tick);
 
@@ -3388,6 +3546,7 @@ template <class P>
 void TextureCache<P>::DeleteImage(ImageId image_id, bool immediate_delete) {
     ImageBase& image = slot_images[image_id];
     ++images_deleted;
+    VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Invalidation);
     // Drop every decode still queued for it, whatever IsDecoding says: an image re-decoded while
     // a decode was in flight has two, and the first to finish clears the flag. A decode left
     // behind was uploaded into the next image to take this slot (another texture's data: garbage

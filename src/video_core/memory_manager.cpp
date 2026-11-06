@@ -19,6 +19,7 @@
 #include "video_core/host1x/host1x.h"
 #include "video_core/invalidation_accumulator.h"
 #include "video_core/memory_manager.h"
+#include "video_core/nx2_fast_draw.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/renderer_base.h"
 #include "video_core/texture_cache/util.h"
@@ -608,9 +609,9 @@ bool MemoryManager::IsMemoryDirty(GPUVAddr gpu_addr, size_t size,
 }
 
 size_t MemoryManager::MaxContinuousRange(GPUVAddr gpu_addr, size_t size) const {
-    // Native storage buffers ask this for up to 8 MiB on each bind, ~70,000 times a second in
-    // title 1's forest (17% of the GPU thread walking pages): keep answers per thread until the
-    // page table changes.
+    // Native storage buffers ask this for up to 64 MiB on each bind, ~370,000 times a second in
+    // title 1's forest: keep answers per thread until the page table changes. Four ways per set:
+    // direct-mapped, conflicts still walked ~14,000 ranges a second.
     struct Entry {
         size_t owner;
         GPUVAddr gpu_addr;
@@ -618,15 +619,23 @@ size_t MemoryManager::MaxContinuousRange(GPUVAddr gpu_addr, size_t size) const {
         u64 serial;
         size_t result;
     };
-    thread_local std::array<Entry, 64> cache{};
+    constexpr size_t Ways = 4;
+    thread_local std::array<std::array<Entry, Ways>, 1024> cache{};
     const u64 serial = map_serial.load(std::memory_order_acquire);
-    Entry& entry = cache[((gpu_addr ^ size) * 0x9E3779B97F4A7C15ULL) >> 58];
-    if (entry.owner == unique_identifier + 1 && entry.gpu_addr == gpu_addr && entry.size == size &&
-        entry.serial == serial) {
-        return entry.result;
+    auto& set = cache[((gpu_addr ^ size) * 0x9E3779B97F4A7C15ULL) >> 54];
+    for (size_t way = 0; way < Ways; ++way) {
+        const Entry& entry = set[way];
+        if (entry.owner == unique_identifier + 1 && entry.gpu_addr == gpu_addr &&
+            entry.size == size && entry.serial == serial) {
+            const size_t result = entry.result;
+            // Keep the most recent answers first; the last way is the one replaced.
+            std::rotate(set.begin(), set.begin() + way, set.begin() + way + 1);
+            return result;
+        }
     }
     const size_t result = MaxContinuousRangeUncached(gpu_addr, size);
-    entry = {unique_identifier + 1, gpu_addr, size, serial, result};
+    std::rotate(set.begin(), set.end() - 1, set.end());
+    set[0] = {unique_identifier + 1, gpu_addr, size, serial, result};
     return result;
 }
 
@@ -863,6 +872,7 @@ void MemoryManager::FlushCaching() {
     if (accumulator.InvalidateAll([this](GPUVAddr addr, size_t size) {
         GetSubmappedRangeImpl<false>(addr, size, page_stash2);
     })) {
+        VideoCommon::Nx2FastDraw::NoteInvalidation();
         rasterizer->InnerInvalidation(page_stash2);
         page_stash2.clear();
     }

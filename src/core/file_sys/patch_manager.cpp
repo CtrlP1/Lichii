@@ -526,6 +526,37 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
                  patch.module_offset);
     }
 
+    // EDEN_NX2_PROBE=<module>:<offset>[,<offset>...] (diagnostics): replaces the PAC hint at the
+    // start of each function (PACIBSP/PACIASP, a no-op under emulation) with SVC #0xF0, which
+    // logs the calling guest thread and its frame chain and returns (Kernel::Svc::Nx2Probe).
+    if (const char* probe = std::getenv("EDEN_NX2_PROBE"); probe != nullptr) {
+        const std::string_view text{probe};
+        const auto colon = text.find(':');
+        if (colon != std::string_view::npos && text.substr(0, colon) == name) {
+            std::string_view list = text.substr(colon + 1);
+            while (!list.empty()) {
+                const auto comma = list.find(',');
+                const std::string item{list.substr(0, comma)};
+                list = comma == std::string_view::npos ? std::string_view{} : list.substr(comma + 1);
+                const u64 module_offset = std::strtoull(item.c_str(), nullptr, 0);
+                const size_t offset = sizeof(Loader::NSOHeader) + module_offset;
+                if (out.size() < offset + sizeof(u32)) {
+                    continue;
+                }
+                u32 word;
+                std::memcpy(&word, out.data() + offset, sizeof(word));
+                if (word != 0xd503237fU && word != 0xd503233fU) {
+                    LOG_WARNING(Loader, "    - Probe at {}+{:#x} skipped: {:#010x} is not a PAC hint",
+                                name, module_offset, word);
+                    continue;
+                }
+                constexpr u32 svc_probe = 0xd4000001U | (0xF0U << 5);
+                std::memcpy(out.data() + offset, &svc_probe, sizeof(svc_probe));
+                LOG_WARNING(Loader, "    - Probe installed at {}+{:#x}", name, module_offset);
+            }
+        }
+    }
+
     if (out.size() < sizeof(Loader::NSOHeader)) {
         return nso;
     }

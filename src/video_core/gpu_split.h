@@ -12,14 +12,7 @@
 #include <type_traits>
 
 #include "common/common_types.h"
-
-namespace Core {
-class System;
-}
-
-namespace Tegra::Engines {
-class EngineInterface;
-}
+#include "video_core/engines/engine_interface.h"
 
 namespace VideoCommon {
 
@@ -39,13 +32,14 @@ enum class DrainSite : u32 {
     Map,            ///< GPU memory maps before later command reads
     FrontStart,     ///< The front takes an engine's macros over
     FrontVerify,    ///< EDEN_NX2_FRONT_VERIFY
+    MacroDmaCheck,  ///< EDEN_NX2_CMDPAGE_DIAG: a macro's memory read repeated after a full drain
     Count,
 };
 
 inline constexpr std::array<const char*, static_cast<size_t>(DrainSite::Count)> drain_site_names{
     "other",       "fetch drain",     "acquire",    "semaphore flush", "fence release",
     "list writers", "list sync",      "list flush", "macro dma read",  "macro dma flush",
-    "gp sync fence", "map",           "front start", "front verify",
+    "gp sync fence", "map",           "front start", "front verify",  "macro dma check",
 };
 
 // Splits the GPU thread in two (NX2_GPU_THREAD_SPLIT.md). The GPU thread (the front) takes the
@@ -111,6 +105,9 @@ public:
             entry[1] = *segment;
         }
         Commit(words);
+        if (engine->memory_write_mask[method]) {
+            last_memory_write_position = write_position;
+        }
     }
     void MultiMethod(Tegra::Engines::EngineInterface* engine, u32 method, const u32* words,
                      u32 amount, u32 methods_pending, const GPUVAddr* segment);
@@ -121,15 +118,22 @@ public:
         entry[0] = static_cast<u64>(Kind::Method) | IsLast | Direct | (u64{method & 0xffff} << 8) |
                    (u64{argument} << 32);
         Commit(1);
+        if (engine->memory_write_mask[method]) {
+            last_memory_write_position = write_position;
+        }
     }
 
+    /// Defer flag: the call doesn't end EDEN_NX2_FAST_DRAW reuse (nx2_fast_draw.h).
+    static constexpr u64 FastDrawNeutral = 1 << 7;
+
     /// Runs `func` on the back after everything sent before it. Must be trivially copyable.
+    /// `flags`: FastDrawNeutral when `func` can't change what a draw resolves to.
     template <typename Func>
-    void Defer(const Func& func) {
+    void Defer(const Func& func, u64 flags = 0) {
         static_assert(std::is_trivially_copyable_v<Func> && alignof(Func) <= alignof(u64));
         constexpr size_t payload = (sizeof(Func) + sizeof(u64) - 1) / sizeof(u64);
         u64* const entry = Reserve(2 + payload);
-        entry[0] = static_cast<u64>(Kind::Call) | (u64{payload} << 8);
+        entry[0] = static_cast<u64>(Kind::Call) | flags | (u64{payload} << 8);
         entry[1] = reinterpret_cast<u64>(&CallThunk<Func>);
         std::memcpy(entry + 2, &func, sizeof(Func));
         Commit(2 + payload);
@@ -163,8 +167,9 @@ public:
         last_writer_position = write_position;
     }
     /// Waits until the back executed the compute and copy work sent so far (not what came after).
+    /// Includes writers after NoteSync; page-written flags are not authoritative before this wait.
     /// Returns whether any of it was still queued.
-    bool WaitForWriters();
+    bool WaitForWriters(DrainSite site = DrainSite::ListWriters);
     /// A host-level wait was just sent (a syncpoint acquire, a host WFI, a GP entry with its sync
     /// bit; semaphore acquires drain): the guest's GPU work before it is complete before the
     /// commands after it are fetched.
@@ -174,7 +179,36 @@ public:
     /// Waits until the back executed the work sent before the last NoteSync. Returns whether any
     /// of it was still queued.
     bool WaitForSync();
+    /// Deferred work that can write memory was just sent (puller semaphore releases, maps).
+    void NoteMemoryWrite() {
+        last_memory_write_position = write_position;
+    }
+    /// For the front's macro memory reads (MME DMA): waits until the back executed the methods
+    /// that write memory in command order (memory_write_mask, NoteMemoryWrite), the compute and
+    /// copy work and the work before the last host-level wait, all sent so far.
+    bool WaitForMemoryWriters(DrainSite site);
 
+    /// Maps a guest semaphore address to its tracking slot in sem_write_positions.
+    static constexpr size_t SemSlot(u64 addr) noexcept {
+        return static_cast<size_t>(((addr >> 2) ^ (addr >> 10) ^ (addr >> 18)) & 63U);
+    }
+    /// Records the ring write position of a deferred GPU semaphore or query write.
+    void NoteSemaphoreWrite(u64 addr) noexcept {
+        sem_write_positions[SemSlot(addr)] = write_position;
+        last_release_position = write_position;
+    }
+    /// Records that a compute or DMA command capable of releasing guest memory was queued.
+    void NoteAnyRelease() noexcept {
+        last_release_position = write_position;
+    }
+    /// Returns the ring position of the most recent potential GPU release.
+    [[nodiscard]] u64 LastReleasePosition() const noexcept {
+        return last_release_position;
+    }
+    /// Waits until the back thread has executed any queued semaphore write to the slot of `addr`.
+    bool WaitForSemaphore(u64 addr, DrainSite site = DrainSite::Acquire) {
+        return WaitFor(sem_write_positions[SemSlot(addr)], site);
+    }
 private:
     enum class Kind : u64 {
         Wrap,   ///< The rest of the ring is unused: continue at its start
@@ -234,6 +268,9 @@ private:
     u64 write_position{};
     u64 last_writer_position{};
     u64 last_sync_position{};
+    u64 last_memory_write_position{};
+    u64 last_release_position{};
+    std::array<u64, 64> sem_write_positions{};
     u64 published_local{};
     u64 consumed_cache{};
     /// Words between publishes: small right after a drain, while the back has nothing to do.
@@ -249,6 +286,8 @@ private:
     void* idle_argument{};
     alignas(64) std::atomic<bool> hook_requested{};
     std::atomic<bool> back_running{};
+    /// True when no back thread is active or after BackLoop exits; cleared before thread launch.
+    std::atomic<bool> back_exited{true};
 
     // 128 bytes: x86 spatial prefetchers pull 64-byte lines in pairs. back_waiting and wake are
     // always touched together by both threads, so they share a block.
@@ -259,6 +298,8 @@ private:
     alignas(128) std::atomic<bool> back_waiting{};
     std::atomic<u32> wake{};
     std::jthread back_thread;
+    alignas(128) std::atomic<bool> front_waiting{};
+    std::atomic<u32> front_wake{};
 };
 
 } // namespace VideoCommon

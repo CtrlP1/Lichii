@@ -26,6 +26,7 @@
 #include "common/settings.h"
 #include "video_core/gpu_split.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
+#include "video_core/renderer_vulkan/vk_parallel_record.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
 namespace VideoCommon {
@@ -118,10 +119,17 @@ public:
     void RequestOutsideRenderPassOperationContext(
         std::source_location location = std::source_location::current());
 
+    /// Defers a fragment barrier until a subsequent draw in the active render pass depends on it.
     void DeferFragmentBarrier() {
         fragment_barrier_pending = state.renderpass != VK_NULL_HANDLE;
     }
 
+    /// Returns true if a deferred fragment barrier is currently pending on the active render pass.
+    [[nodiscard]] bool HasFragmentBarrier() const noexcept {
+        return fragment_barrier_pending;
+    }
+
+    /// Clears and returns the pending deferred fragment barrier state.
     bool TakeFragmentBarrier() {
         return std::exchange(fragment_barrier_pending, false);
     }
@@ -137,6 +145,16 @@ public:
     /// Returns true when a render pass is currently active in the scheduler state.
     bool IsRenderPassActive() const {
         return state.renderpass != VK_NULL_HANDLE;
+    }
+
+    /// Changes whenever a render pass begins or ends.
+    u64 RenderPassSerial() const {
+        return render_pass_serial;
+    }
+
+    /// The graphics pipeline bound in the current command buffer, if the scheduler knows it.
+    const GraphicsPipeline* BoundGraphicsPipeline() const {
+        return state.graphics_pipeline;
     }
 
     /// Update the pipeline to the current execution context.
@@ -208,6 +226,11 @@ public:
     /// Returns the current command buffer tick.
     [[nodiscard]] u64 CurrentTick() const noexcept {
         return master_semaphore->CurrentTick();
+    }
+
+    /// Monotonic counter incremented whenever command-buffer or render-pass state resets.
+    [[nodiscard]] u64 RecordingEpoch() const noexcept {
+        return recording_epoch;
     }
 
     /// Returns true when a tick has been triggered by the GPU.
@@ -436,6 +459,7 @@ private:
     std::unique_ptr<MasterSemaphore> master_semaphore;
     bool fragment_barrier_pending{};
     bool render_pass_has_stores{};
+    u64 render_pass_serial{};
     bool graphics_pipeline_missing{};
     std::unique_ptr<CommandPool> command_pool;
 
@@ -489,6 +513,7 @@ private:
     std::function<void()> on_submit;
 
     State state;
+    u64 recording_epoch = 0;
 
     u32 num_renderpass_images = 0;
     std::array<VkImage, 9> renderpass_images{};
@@ -501,6 +526,8 @@ private:
     std::mutex queue_mutex;
     std::condition_variable_any event_cv;
     bool worker_waiting{}; ///< The worker is waiting for work (guarded by queue_mutex)
+    std::unique_ptr<ParallelRecord::SecondarySource> secondary_pools;
+    std::unique_ptr<ParallelRecord> parallel_record; ///< EDEN_NX2_PARALLEL_RECORD, worker only
     std::jthread worker_thread;
 
     std::chrono::steady_clock::duration frame_interval{};

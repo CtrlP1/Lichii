@@ -16,6 +16,7 @@
 #include <type_traits>
 // TODO: find out which don't require stable iters
 #include <unordered_map>
+#include <unordered_set>
 #include "common/container/unordered_map.h"
 #include "common/container/unordered_set.h"
 #include <vector>
@@ -276,6 +277,15 @@ public:
     /// Mark images in a range as modified from the CPU
     void WriteMemory(DAddr cpu_addr, size_t size);
 
+    /// EDEN_NX2_INLINE_INVALIDATE: changes whenever an image is registered.
+    [[nodiscard]] u64 PageSerial() const noexcept {
+        return page_serial.load(std::memory_order_acquire);
+    }
+
+    /// The page serial when no image overlaps [cpu_addr, cpu_addr + size), else 0.
+    /// @pre mutex is locked
+    [[nodiscard]] u64 CleanSerial(DAddr cpu_addr, size_t size);
+
     /// Download contents of host images to guest memory in a region
     void DownloadMemory(DAddr cpu_addr, size_t size);
 
@@ -348,6 +358,8 @@ public:
     void PrepareImage(ImageId image_id, bool is_modification, bool invalidate);
 
     Common::SpinRecursiveMutex mutex;
+
+    std::atomic<u64> page_serial{1};
 
 private:
     /// Iterate over all page indices in a range
@@ -556,9 +568,25 @@ private:
     [[nodiscard]] std::optional<DAddr> ImageCpuAddress(GPUVAddr gpu_addr, size_t size) const;
 
     bool has_deleted_images = false;
+    /// True while a clear binds its render targets (UpdateRenderTargets(true)), so JoinImages can
+    /// skip the upload of a new target the clear overwrites whole.
+    bool clearing_render_targets = false;
     bool is_rescaling = false;
     u64 total_used_memory = 0;
     u64 minimum_memory;
+    std::unordered_set<u64> known_images;
+    std::unordered_set<u64> known_device_addresses;
+    std::unordered_set<u64> known_contents;
+    std::map<u32, u64> created_by_format;
+    u64 created_sparse{};
+    u64 created_overlapping{};
+    u64 created_writes{};
+    u64 created_blank{};
+    u64 created_duplicate{};
+    u64 known_content_bytes{};
+    u64 known_image_bytes{};
+    u64 images_recreated{};
+    u64 recreated_bytes{};
     u64 expected_memory;
     u64 critical_memory;
     size_t gpu_unswizzle_maxsize = 0;

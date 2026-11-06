@@ -36,6 +36,16 @@ namespace Dynarmic::Backend::X64 {
 
 class RegAlloc;
 
+/// UseScratch of a value with later uses copies it to a free register instead of spilling it.
+/// A comparison switch: blocks already compiled keep what they were compiled with.
+extern bool copy_to_free_register;
+
+/// Each A64 block sets up a frame in rbp for stack walkers. EDEN_DYN_BLOCK_FRAME=1 keeps it.
+extern bool block_frame_pointer;
+
+/// A64 conditional branches become side exits of longer blocks. EDEN_DYN_SUPERBLOCK=0 turns it off.
+extern bool superblocks_enabled;
+
 struct HostLocInfo {
 public:
     HostLocInfo() {}
@@ -224,6 +234,7 @@ private:
     friend struct Argument;
 
     HostLoc SelectARegister(std::bitset<32> desired_locations) const noexcept;
+    bool HasEmptyRegister(std::bitset<32> desired_locations) const noexcept;
     std::optional<HostLoc> ValueLocation(const IR::Inst* value) const noexcept;
     HostLoc UseImpl(BlockOfCode& code, IR::Value use_value, std::bitset<32> desired_locations) noexcept;
     HostLoc UseScratchImpl(BlockOfCode& code, IR::Value use_value, std::bitset<32> desired_locations) noexcept;
@@ -256,6 +267,7 @@ private:
     alignas(64) std::array<HostLocInfo, NonSpillHostLocCount + SpillCount> hostloc_info;
     std::bitset<32> gpr_order;
     std::bitset<32> xmm_order;
+    bool in_host_call = false;
     size_t reserved_stack_space = 0;
 };
 

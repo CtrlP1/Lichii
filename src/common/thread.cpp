@@ -13,6 +13,7 @@
 #include "common/error.h"
 #include "common/event_wait.h"
 #include "common/logging.h"
+#include "common/nx2_sample_profile.h"
 #include "common/assert.h"
 #include "common/thread.h"
 #ifdef __APPLE__
@@ -504,6 +505,7 @@ void SetCurrentThreadPriority(ThreadPriority new_priority) {
 }
 
 void SetCurrentThreadName(const char* name) {
+    Nx2SampleProfile::OnThreadNamed(name);
 #ifdef _MSC_VER
     // Sets the debugger-visible name of the current thread.
     if (auto pf = (decltype(&SetThreadDescription))(void*)GetProcAddress(GetModuleHandle(TEXT("KernelBase.dll")), "SetThreadDescription"); pf)
@@ -629,6 +631,89 @@ void PollThreadPolicies() {
 #endif
 }
 
+#ifdef _WIN32
+Event::~Event() {
+    if (timed_wait_event) {
+        CloseHandle(timed_wait_event);
+    }
+}
+
+void Event::WakeTimedWaiters() {
+    if (timed_wait_event) {
+        SetEvent(timed_wait_event);
+    }
+}
+
+bool Event::WaitForWin32Fallback(const std::chrono::nanoseconds time) {
+    std::unique_lock lk{mutex};
+    using Clock = std::chrono::steady_clock;
+    const auto now = Clock::now();
+    const auto deadline = Clock::time_point{EventWaitDeadline(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()), time)};
+    while (!is_set.load()) {
+        if (Clock::now() >= deadline) {
+            return false;
+        }
+        struct Timer {
+            Timer() {
+                handle = CreateWaitableTimerExW(nullptr, nullptr,
+                                                CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                                TIMER_MODIFY_STATE | SYNCHRONIZE);
+                if (!handle) {
+                    handle = CreateWaitableTimerExW(nullptr, nullptr, 0,
+                                                    TIMER_MODIFY_STATE | SYNCHRONIZE);
+                }
+            }
+            ~Timer() {
+                if (handle) {
+                    CloseHandle(handle);
+                }
+            }
+            HANDLE handle{};
+        };
+        static thread_local Timer timer;
+        if (!timed_wait_event) {
+            timed_wait_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        }
+        const auto remaining = deadline - Clock::now();
+        if (remaining <= Clock::duration::zero()) {
+            return false;
+        }
+        const auto step = (std::min<Clock::duration>)(remaining, std::chrono::hours{24});
+        if (timed_wait_event) {
+            ResetEvent(timed_wait_event);
+            using TimerTicks = std::chrono::duration<s64, std::ratio<1, 10'000'000>>;
+            LARGE_INTEGER due{};
+            due.QuadPart = -std::chrono::ceil<TimerTicks>(step).count();
+            const bool armed =
+                timer.handle && SetWaitableTimerEx(timer.handle, &due, 0, nullptr, nullptr, nullptr, 0);
+            const HANDLE handles[]{timed_wait_event, timer.handle};
+            const auto milliseconds = std::chrono::ceil<std::chrono::milliseconds>(step);
+            const DWORD timeout =
+                static_cast<DWORD>((std::min<s64>)(milliseconds.count(), INFINITE - 1));
+            lk.unlock();
+            const DWORD result = armed ? WaitForMultipleObjects(2, handles, FALSE, INFINITE)
+                                       : WaitForSingleObject(timed_wait_event, timeout);
+            if (armed) {
+                CancelWaitableTimer(timer.handle);
+            }
+            lk.lock();
+            if (result != WAIT_FAILED) {
+                continue;
+            }
+        }
+        const auto rem2 = deadline - Clock::now();
+        if (rem2 > Clock::duration::zero()) {
+            const auto fallback = std::chrono::ceil<std::chrono::milliseconds>(
+                (std::min<Clock::duration>)(rem2, std::chrono::hours{24}));
+            condvar.wait_for(lk, fallback, [this] { return is_set.load(); });
+        }
+    }
+    is_set = false;
+    return true;
+}
+#endif
+
 #ifdef ARCHITECTURE_x86_64
 // On Linux and UNIX systems, a futex would nominally be used to cover the costs
 // the idea is that it's intuitivelly cheaper to use a direct instruction as opposed to a full futex call
@@ -656,6 +741,10 @@ bool Event::WaitFor(const std::chrono::nanoseconds time) {
     };
     const u64 ticks_per_second = Common::g_wall_clock.NsToTicks(std::chrono::seconds{1});
     if (caps.monitorx) {
+        const auto deadline = EventWaitDeadline(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()), time);
+        const u64 ticks_per_second = Common::g_wall_clock.NsToTicks(std::chrono::seconds{1});
         while (true) {
             // Armed monitor, as per manual, MWAITX must be conditional if the condition isn't satisfied
             // to prevent a race condition.
@@ -697,10 +786,7 @@ bool Event::WaitFor(const std::chrono::nanoseconds time) {
                 return true;
         }
     }
-    while (!is_set.load() && remaining() > std::chrono::nanoseconds::zero())
-        Common::Windows::SleepForOneTick();
-    bool expected = true;
-    return is_set.compare_exchange_strong(expected, false, std::memory_order_release);
+    return WaitForWin32Fallback(time);
 #else
     std::unique_lock lk{mutex};
     const auto now = std::chrono::steady_clock::now();
@@ -715,12 +801,7 @@ bool Event::WaitFor(const std::chrono::nanoseconds time) {
 #else
 bool Event::WaitFor(const std::chrono::nanoseconds time) {
 #ifdef _WIN32
-    auto const end = Common::g_wall_clock.GetTimeNS() + time;
-    while (!is_set.load() && end > Common::g_wall_clock.GetTimeNS())
-        Common::Windows::SleepForOneTick();
-    if (is_set.load())
-        Reset();
-    return true;
+    return WaitForWin32Fallback(time);
 #else
     std::unique_lock lk{mutex};
     const auto now = std::chrono::steady_clock::now();

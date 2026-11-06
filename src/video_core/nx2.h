@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "common/common_types.h"
+#include "common/thread.h"
 
 namespace Tegra {
 
@@ -34,12 +35,16 @@ inline void Nx2MarkGpuWritten(u64 device_address, u64 size) {
     }
     const u64 last = std::min<u64>((device_address + size - 1) >> Nx2WrittenPageBits,
                                    g_nx2_gpu_written_pages.size() * 64 - 1);
-    for (u64 page = device_address >> Nx2WrittenPageBits; page <= last; ++page) {
+    // A word at a time: storage buffer binds mark megabytes, mostly marked already.
+    for (u64 page = device_address >> Nx2WrittenPageBits; page <= last;) {
+        const u64 first_bit = page % 64;
+        const u64 bits = std::min<u64>(64 - first_bit, last - page + 1);
+        const u64 mask = (bits == 64 ? ~u64{0} : (u64{1} << bits) - 1) << first_bit;
         auto& word = g_nx2_gpu_written_pages[page / 64];
-        const u64 bit = u64{1} << (page % 64);
-        if ((word.load(std::memory_order_relaxed) & bit) == 0) {
-            word.fetch_or(bit, std::memory_order_relaxed);
+        if ((word.load(std::memory_order_relaxed) & mask) != mask) {
+            word.fetch_or(mask, std::memory_order_relaxed);
         }
+        page += bits;
     }
 }
 
@@ -341,6 +346,11 @@ public:
         return waiters;
     }
 
+    void SetWakeEvent(Common::Event* event) {
+        std::scoped_lock lk{mutex};
+        wake_event = event;
+    }
+
     void Add(const void* owner, u64 device_address, u32 value, u32 operation) {
         std::scoped_lock lk{mutex};
         std::erase_if(waiters, [owner](const Waiter& w) { return w.owner == owner; });
@@ -371,11 +381,18 @@ public:
         if (count.load(std::memory_order_acquire) == 0) {
             return;
         }
-        std::scoped_lock lk{mutex};
-        for (auto& w : waiters) {
-            if (w.address == device_address && !w.latched && Matches(w, value)) {
-                w.latched = true;
+        Common::Event* to_wake = nullptr;
+        {
+            std::scoped_lock lk{mutex};
+            for (auto& w : waiters) {
+                if (w.address == device_address && !w.latched && Matches(w, value)) {
+                    w.latched = true;
+                    to_wake = wake_event;
+                }
             }
+        }
+        if (to_wake != nullptr) {
+            to_wake->Set();
         }
     }
 
@@ -404,6 +421,7 @@ private:
     std::mutex mutex;
     std::vector<Waiter> waiters;
     std::atomic<size_t> count{};
+    Common::Event* wake_event{};
 };
 
 } // namespace Tegra

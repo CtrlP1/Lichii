@@ -29,14 +29,17 @@
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/dirty_flags.h"
+#include "video_core/gpu_split.h"
 #include "video_core/memory_manager.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/macro.h"
+#include "video_core/query_dma.h"
 
 #include "common/assert.h"
 #include "common/bit_field.h"
 #include "common/logging.h"
 #include "video_core/engines/maxwell_3d.h"
+#include "video_core/nx2_fast_draw.h"
 #include "video_core/nx2_profile.h"
 
 namespace Tegra {
@@ -1432,6 +1435,20 @@ void MacroEngine::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u
                             }
                         }
                     }
+                    // Accurate GPU mode holds report and semaphore writes in the query cache until a
+                    // fence: write them out, or occlusion predicates read stale values. The split only
+                    // runs with immediate payload writes, and the query cache belongs to its back.
+                    const bool owns_caches = !VideoCommon::GpuSplit::Get().Active() ||
+                                             VideoCommon::GpuSplit::OnBackThread();
+                    if (owns_caches && VideoCommon::QueryDma::TraceEnabled() &&
+                        VideoCommon::QueryDma::HasPendingQueries(memory, maxwell3d.Rasterizer(),
+                                                                 source, read_bytes)) {
+                        VideoCommon::QueryDma::Trace(memory, maxwell3d.Rasterizer(), method, address,
+                                                     source, read_bytes);
+                    }
+                    if (!VideoCommon::GpuSplit::Get().Active()) {
+                        memory.FlushRegion(source, read_bytes, VideoCommon::CacheType::QueryCache);
+                    }
                     if (memory.IsMemoryDirty(source, read_bytes, VideoCommon::CacheType::BufferCache)) {
                         memory.FlushRegion(source, read_bytes, VideoCommon::CacheType::BufferCache);
                         static u64 flushes{};
@@ -1593,8 +1610,12 @@ void MacroEngine::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u
 
         UNREACHABLE();
     };
+    // HLE programs write registers directly, without the 3D engine's fast draw breaks.
+    namespace FastDraw = VideoCommon::Nx2FastDraw;
     if (auto const it = macro_cache.find(method); it != macro_cache.end()) {
+        FastDraw::Break(FastDraw::Reason::Method, method);
         execute_variant(it->second.program);
+        FastDraw::Break(FastDraw::Reason::Method, method);
         return;
     }
 
@@ -1635,7 +1656,9 @@ void MacroEngine::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u
         ci.program = Compile(system, maxwell3d, code);
     }
 
+    FastDraw::Break(FastDraw::Reason::Method, method);
     execute_variant(ci.program);
+    FastDraw::Break(FastDraw::Reason::Method, method);
     if (Settings::values.dump_macros) {
         Dump(ci.hash, code, !std::holds_alternative<std::monostate>(ci.program));
     }

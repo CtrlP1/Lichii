@@ -623,6 +623,20 @@ static void A64GetSetElimination(IR::Block& block) {
             do_set(nzcv_info, inst->GetArg(0), inst, TrackingType::NZCVRaw);
             break;
         }
+        case IR::Opcode::A64SideExitIf:
+        case IR::Opcode::A64SideExitIfBit: {
+            // The state leaves the block here: every set so far must reach memory, but the
+            // values stay known to the instructions after it (the path that stays).
+            for (auto& info : reg_info) {
+                info.set_instruction_present = false;
+            }
+            for (auto& info : vec_info) {
+                info.set_instruction_present = false;
+            }
+            sp_info.set_instruction_present = false;
+            nzcv_info.set_instruction_present = false;
+            break;
+        }
         default: {
             if (ReadsFromCPSR(opcode) || WritesToCPSR(opcode)) {
                 nzcv_info = {};

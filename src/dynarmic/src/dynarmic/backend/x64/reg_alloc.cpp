@@ -6,6 +6,7 @@
  * SPDX-License-Identifier: 0BSD
  */
 
+#include <cstdlib>
 #include <algorithm>
 #include <limits>
 #include <numeric>
@@ -297,13 +298,19 @@ HostLoc RegAlloc::UseScratchImpl(BlockOfCode& code, IR::Value use_value, std::bi
     const HostLoc current_location = *ValueLocation(use_inst);
     const size_t bit_width = GetBitWidth(use_inst->GetType());
     if (HostLocIsRegister(current_location) && desired_locations.test(size_t(current_location)) && !LocInfo(current_location).IsLocked()) {
-        if (LocInfo(current_location).IsLastUse()) {
-            LocInfo(current_location).is_set_last_use = true;
-        } else {
-            MoveOutOfTheWay(code, current_location);
+        // The value has later uses: copying it to a free register (below) leaves it in place, and
+        // costs a register move instead of a store and reload through the stack on the critical
+        // path of nearly every block. Spill only when no register is free.
+        const bool last_use = LocInfo(current_location).IsLastUse();
+        if (last_use || !copy_to_free_register || !HasEmptyRegister(desired_locations)) {
+            if (last_use) {
+                LocInfo(current_location).is_set_last_use = true;
+            } else {
+                MoveOutOfTheWay(code, current_location);
+            }
+            LocInfo(current_location).WriteLock();
+            return current_location;
         }
-        LocInfo(current_location).WriteLock();
-        return current_location;
     }
 
     const HostLoc destination_location = SelectARegister(desired_locations);
@@ -340,6 +347,7 @@ void RegAlloc::HostCall(
         return ret;
     }();
 
+    in_host_call = true;
     ScratchGpr(code, ABI_RETURN);
     if (result_def)
         DefineValueImpl(code, result_def, ABI_RETURN);
@@ -379,6 +387,7 @@ void RegAlloc::HostCall(
             }
         }
     }
+    in_host_call = false;
 }
 
 void RegAlloc::AllocStackSpace(BlockOfCode& code, const size_t stack_space) noexcept {
@@ -393,6 +402,25 @@ void RegAlloc::ReleaseStackSpace(BlockOfCode& code, const size_t stack_space) no
     ASSERT(reserved_stack_space == stack_space);
     reserved_stack_space = 0;
     code.add(code.rsp, u32(stack_space));
+}
+
+// EDEN_DYN_SPILL=1: spill as before (for comparisons).
+bool copy_to_free_register = std::getenv("EDEN_DYN_SPILL") == nullptr;
+bool block_frame_pointer = std::getenv("EDEN_DYN_BLOCK_FRAME") != nullptr;
+bool superblocks_enabled = [] {
+    const char* value = std::getenv("EDEN_DYN_SUPERBLOCK");
+    return value == nullptr || value[0] != '0';
+}();
+
+bool RegAlloc::HasEmptyRegister(std::bitset<32> desired_locations) const noexcept {
+    for (HostLoc i = HostLoc(0); i < HostLoc(desired_locations.size()); i = HostLoc(size_t(i) + 1)) {
+        // The same registers SelectARegister leaves alone.
+        if (desired_locations.test(size_t(i)) && i != HostLoc::RBP &&
+            !(i >= HostLoc::R13 && i <= HostLoc::R15) && LocInfo(i).IsEmpty()) {
+            return true;
+        }
+    }
+    return false;
 }
 
 HostLoc RegAlloc::SelectARegister(std::bitset<32> desired_locations) const noexcept {
@@ -526,6 +554,31 @@ void RegAlloc::SpillRegister(BlockOfCode& code, HostLoc loc) noexcept {
     ASSERT(HostLocIsRegister(loc) && "Only registers can be spilled");
     ASSERT(!LocInfo(loc).IsEmpty() && "There is no need to spill unoccupied registers");
     ASSERT(!LocInfo(loc).IsLocked() && "Registers that have been allocated must not be spilt");
+    if (copy_to_free_register && HostLocIsGPR(loc)) {
+        // A free register is a register move away; the stack is a store now and a reload on the
+        // critical path later. Inside HostCall never a host call register: memory emitters Use()
+        // a value in ABI_PARAM2, end the allocation scope and only then call HostCall, whose
+        // spill of RAX would land on that still needed but already released parameter.
+        static const std::vector<HostLoc> any_order{HostLoc::RBX, HostLoc::R12, HostLoc::RSI, HostLoc::RDI,
+                                                    HostLoc::R8, HostLoc::R9, HostLoc::R10, HostLoc::R11,
+                                                    HostLoc::RCX, HostLoc::RDX};
+        static const std::vector<HostLoc> call_order = [] {
+            std::vector<HostLoc> r;
+            for (const HostLoc loc : any_order) {
+                if (loc != ABI_PARAM1 && loc != ABI_PARAM2 && loc != ABI_PARAM3 && loc != ABI_PARAM4 && loc != ABI_RETURN) {
+                    r.push_back(loc);
+                }
+            }
+            return r;
+        }();
+        const std::vector<HostLoc>& order = in_host_call ? call_order : any_order;
+        for (const HostLoc candidate : order) {
+            if (candidate != loc && LocInfo(candidate).IsEmpty() && !LocInfo(candidate).IsLocked()) {
+                Move(code, candidate, loc);
+                return;
+            }
+        }
+    }
     auto const new_loc = FindFreeSpill(HostLocIsXMM(loc));
     Move(code, new_loc, loc);
 }
