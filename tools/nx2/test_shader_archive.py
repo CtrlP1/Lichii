@@ -2,6 +2,7 @@ import struct
 import unittest
 
 from shader_archive import ArchiveError, find_bnsh, parse_bnsh, parse_sarc
+from extract_static_shaders import walk_container
 
 
 def bnsh(stage=0):
@@ -65,6 +66,16 @@ class ShaderArchiveTests(unittest.TestCase):
                 struct.pack_into("<I", data, 0x354, 5 << 16)
                 with self.assertRaises(ArchiveError):
                     parse_bnsh(bytes(data))
+
+    def test_effect_bundle_extracts_embedded_graphics_and_compute(self):
+        header = b"YB\x05\x00" + bytes(12)
+        data = header + bnsh() + bytes(48) + bnsh(5)
+        records = list(walk_container(data, "effects.vsetb.byml"))
+        self.assertEqual([record["stage"] for record in records], ["vertex", "compute"])
+        self.assertTrue(records[0]["member"].endswith("!BNSH@10"))
+        self.assertEqual(list(walk_container(data, "unrelated.byml")), [])
+        with self.assertRaises(ArchiveError):
+            list(walk_container(data[:-1], "effects.vsetb.byml"))
 
     def test_bad_bnsh(self):
         for offset, value, fmt in ((0x7c, 0xffffffff, "I"), (0xd0, 0x3ff, "Q"),

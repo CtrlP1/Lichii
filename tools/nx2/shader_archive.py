@@ -134,6 +134,11 @@ def find_bnsh(data: bytes) -> list[tuple[int, bytes]]:
         raise ArchiveError("not a BFSHA archive")
     if data[0xc:0xe] != b"\xff\xfe" or struct.unpack_from("<I", data, 0x1c)[0] != len(data):
         raise ArchiveError("invalid BFSHA byte order or size")
+    return find_embedded_bnsh(data)
+
+
+def find_embedded_bnsh(data: bytes) -> list[tuple[int, bytes]]:
+    """Return validated BNSH allocations embedded in a known container."""
     result = []
     offset = 0
     while True:
@@ -149,5 +154,5 @@ def find_bnsh(data: bytes) -> list[tuple[int, bytes]]:
         result.append((offset, bnsh))
         offset += size
     if not result:
-        raise ArchiveError("BFSHA contains no supported BNSH")
+        raise ArchiveError("container contains no supported BNSH")
     return result

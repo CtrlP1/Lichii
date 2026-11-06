@@ -10,7 +10,7 @@ from pathlib import Path
 import re
 import sys
 
-from shader_archive import ArchiveError, find_bnsh, parse_bnsh, parse_sarc
+from shader_archive import ArchiveError, find_bnsh, find_embedded_bnsh, parse_bnsh, parse_sarc
 from shader_containers import MAX_ALLOCATION, dcx_decompress, parse_bnd4, parse_cgsb, parse_sharcb, parse_shn, read_zstd_dictionaries, zstd_decompress
 
 
@@ -35,6 +35,10 @@ def walk_container(data, name, depth=0, dictionaries=None):
                 yield {"member": name + "!" + member, "error": str(exc)}
     elif magic == b"FSHA":
         for offset, bnsh in find_bnsh(data):
+            yield from walk_container(bnsh, name + f"!BNSH@{offset:x}", depth + 1, dictionaries)
+    elif magic == b"YB\x05\x00" and name.lower().endswith(
+            (".vsetb.byml", ".vsetb.byml.zs!zstd")):
+        for offset, bnsh in find_embedded_bnsh(data):
             yield from walk_container(bnsh, name + f"!BNSH@{offset:x}", depth + 1, dictionaries)
     elif magic in (b"BNSH", b"CGSB", b"SHN!", b"BAHS"):
         parser = {b"BNSH": parse_bnsh, b"CGSB": parse_cgsb, b"SHN!": parse_shn, b"BAHS": parse_sharcb}[magic]

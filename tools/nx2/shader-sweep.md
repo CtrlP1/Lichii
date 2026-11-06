@@ -120,6 +120,10 @@ python tools/nx2/playthrough_hints.py import \
     --compiler /path/to/shader-sweep --output /path/to/rebuilt-cache
 ```
 
+Zelda's NVN2 `.vsetb.byml.zs` effect bundles may contain additional embedded
+BNSH graphics and compute programs. Include the shared effects bundle and
+relevant scene bundles in the local extraction inputs.
+
 Pass each local extraction manifest with a separate `--manifest`. The importer
 requires an exact packed shader match for every stage and reports incomplete
 pipelines separately. NVN2 BNSH and BAHS task and mesh records can supply
