@@ -5,6 +5,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "common/scope_exit.h"
+#include <utility>
+#include <array>
 #include <vector>
 #include <tuple>
 #include <mutex>
@@ -149,6 +151,25 @@ void ServiceFrameworkBase::ReportUnimplementedFunction(HLERequestContext& ctx,
     const bool auto_stub = Settings::values.use_auto_stub || env_auto_stub ||
                            std::string_view{service_name}.starts_with(Nx2StubPrefix) ||
                            (caller != nullptr && caller->IsSwitch2());
+    // Commands Ocarina of Time calls once and runs fine with on the zeroed auto stub reply. Nothing
+    // is known about them; the reply stays the same, only the Critical report goes away.
+    if (auto_stub) {
+        constexpr std::array<std::pair<std::string_view, u32>, 4> known_stubs{{
+            {"nx2:vi2", 201},
+            {"IGeneralService", 101},
+            {"nx2:gsv", 903},
+            {"prepo:u", 10500},
+        }};
+        const std::pair<std::string_view, u32> command{service_name, ctx.GetCommand()};
+        if (std::find(known_stubs.begin(), known_stubs.end(), command) != known_stubs.end()) {
+            LOG_DEBUG(Service, "Known auto stub {}::{}", service_name, ctx.GetCommand());
+            IPC::ResponseBuilder rb{ctx, 2 + StubZeroedWords};
+            rb.Push(ResultSuccess);
+            PushStubZeroes(rb);
+            return;
+        }
+    }
+
     // Auto-stubbed commands are reported once each: title 1 polls nx2:camera 29 every frame
     // (~47 calls a second), and every report wrote a Critical line, which flushes the log file.
     if (auto_stub) {
