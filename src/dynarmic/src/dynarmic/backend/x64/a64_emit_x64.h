@@ -70,6 +70,8 @@ public:
 
     // Microinstruction emitters
     void EmitPushRSB(EmitContext& ctx, IR::Inst* inst);
+    void EmitSideExit(A64EmitContext& ctx, SharedLabel exit, u64 target, u64 cycles);
+    bool EmitFusedSideExit(A64EmitContext& ctx, IR::Inst* test, IR::Inst* exit_inst);
 #define OPCODE(...)
 #define A32OPC(...)
 #define A64OPC(name, type, ...) void EmitA64##name(A64EmitContext& ctx, IR::Inst* inst);

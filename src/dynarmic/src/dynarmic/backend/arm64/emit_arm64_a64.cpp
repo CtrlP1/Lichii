@@ -183,6 +183,17 @@ void EmitA64CheckMemoryAbort(oaknut::CodeGenerator& code, EmitContext& ctx, IR::
     EmitRelocation(code, ctx, LinkTarget::ReturnFromRunCode);
 }
 
+// Superblocks are an x64 backend option, so these never reach this backend.
+template<>
+void EmitIR<IR::Opcode::A64SideExitIf>(oaknut::CodeGenerator&, EmitContext&, IR::Inst*) {
+    UNREACHABLE();
+}
+
+template<>
+void EmitIR<IR::Opcode::A64SideExitIfBit>(oaknut::CodeGenerator&, EmitContext&, IR::Inst*) {
+    UNREACHABLE();
+}
+
 template<>
 void EmitIR<IR::Opcode::A64SetCheckBit>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
     auto args = ctx.reg_alloc.GetArgumentInfo(inst);

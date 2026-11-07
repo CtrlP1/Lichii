@@ -80,6 +80,21 @@
 
 namespace Service {
 
+/// When a video frame was last decoded (steady clock, ns). EDEN_NX2_SWAP_INTERVAL does not apply
+/// while one plays: movies run on the game's own frame count, so a forced interval slows them down.
+inline std::atomic<long long> nx2_last_video_frame_ns{0};
+
+inline long long Nx2SteadyNowNs() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+inline bool Nx2VideoPlaying() {
+    const long long last = nx2_last_video_frame_ns.load(std::memory_order_relaxed);
+    return last != 0 && Nx2SteadyNowNs() - last < 1'000'000'000LL;
+}
+
 // Creates a session served by `iface` and returns its client end. Unlike PushIpcInterface this
 // works from a domain too, for callers that want a raw session handle.
 template <class T>
@@ -1870,6 +1885,7 @@ private:
     // Eden's GPU thread has processed the frame. Otherwise the game laps the GPU thread and
     // rewrites command memory it hasn't read yet.
     u32 m_wait_timeouts{};
+    bool m_video_lifts_swap{};
     struct PresentStats {
         long long frame_us{}, fence_us{}, composite_us{}, pace_us{}, max_fence_us{};
         long long max_frame_us{}, hitches{};
@@ -1923,8 +1939,12 @@ private:
         if (mkw_dynamic) {
             swap_interval = 1;
         }
-        if (forced_interval != 0) {
+        const bool video_playing = forced_interval != 0 && Nx2VideoPlaying();
+        if (forced_interval != 0 && !video_playing) {
             swap_interval = forced_interval;
+        }
+        if (forced_interval != 0 && video_playing != std::exchange(m_video_lifts_swap, video_playing)) {
+            LOG_INFO(Service, "nx2:vi2 forced swap interval {}", video_playing ? "lifted for video" : "restored");
         }
         const u32 refresh_rate = (timing & 0xffff) >= 30 && (timing & 0xffff) <= 240 ? timing & 0xffff : 60;
         if (trace) {
@@ -3017,6 +3037,7 @@ private:
             }
             pictures.clear();
             decoder->Decode(input.data, input.pts, pictures);
+            nx2_last_video_frame_ns.store(Nx2SteadyNowNs(), std::memory_order_relaxed);
             if (input.end) {
                 decoder->Drain(pictures);
             }
